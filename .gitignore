@@ -1,0 +1,48 @@
+# Node modules
+node_modules/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Env files (IMPORTANT)
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Temp files
+tmp/
+temp/
+
+# Uploads (local storage)
+uploads/
+public/uploads/
+
+# Cache
+.cache/
+
+# Coverage
+coverage/
+
+# Database (if local)
+*.db
+*.sqlite
+
+# Security / keys
+*.pem
+*.key
+*.crt
+
+# Misc
+*.pid
+*.seed
+*.pid.lock
