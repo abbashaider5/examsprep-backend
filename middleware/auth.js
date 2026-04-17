@@ -47,10 +47,14 @@ export const signRefreshToken = (userId) => {
   });
 };
 
+// Use VERCEL env var as a reliable cross-domain production signal
+// (NODE_ENV may stay 'development' if .env file overrides it on Vercel)
+export const isProd = () => process.env.NODE_ENV === 'production' || !!process.env.VERCEL;
+
 const cookieOpts = (maxAge) => ({
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+  secure: isProd(),
+  sameSite: isProd() ? 'none' : 'lax',
   maxAge,
 });
 
@@ -63,7 +67,7 @@ export const setAuthCookies = (res, userId) => {
 };
 
 export const clearAuthCookies = (res) => {
-  const opts = { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax' };
+  const opts = { httpOnly: true, secure: isProd(), sameSite: isProd() ? 'none' : 'lax' };
   res.clearCookie('accessToken', opts);
   res.clearCookie('refreshToken', opts);
 };

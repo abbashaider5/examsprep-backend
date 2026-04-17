@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import { setAuthCookies, clearAuthCookies, signAccessToken } from '../middleware/auth.js';
+import { setAuthCookies, clearAuthCookies, signAccessToken, isProd } from '../middleware/auth.js';
 import { AppError } from '../middleware/errorHandler.js';
 import User from '../models/User.js';
 import OTPCode from '../models/OTPCode.js';
@@ -140,8 +140,8 @@ export const refreshAccessToken = async (req, res, next) => {
 
     const accessToken = signAccessToken(user._id);
     res.cookie('accessToken', accessToken, {
-      httpOnly: true, secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      httpOnly: true, secure: isProd(),
+      sameSite: isProd() ? 'none' : 'lax',
       maxAge: 15 * 60 * 1000,
     });
     res.json({ message: 'Token refreshed' });
