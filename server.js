@@ -68,7 +68,9 @@ if (process.env.NODE_ENV !== 'test') {
 
 // Maintenance mode check (excluding admin/auth/health)
 app.use(async (req, res, next) => {
-  const bypass = req.path.startsWith('/api/auth') || req.path.startsWith('/api/admin') || req.path === '/api/health' || req.path.startsWith('/api/settings/public');
+  const p = req.path;
+  const bypass = p.startsWith('/api/auth') || p.startsWith('/api/admin') || p === '/api/health' || p.startsWith('/api/settings/public')
+    || p.startsWith('/auth') || p.startsWith('/admin') || p === '/health' || p.startsWith('/settings/public');
   if (bypass) return next();
   try {
     const settings = await getSettings();
@@ -79,6 +81,7 @@ app.use(async (req, res, next) => {
   next();
 });
 
+// Mount routes under /api/* (standard) AND /* (fallback for clients missing /api prefix)
 app.use('/api', apiLimiter);
 app.use('/api/auth', authRoutes);
 app.use('/api/exams', examRoutes);
@@ -92,7 +95,22 @@ app.use('/api/logs', logsRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/instructor', instructorRoutes);
 
+// Bare-path fallback (handles VITE_API_URL set without /api suffix)
+app.use(apiLimiter);
+app.use('/auth', authRoutes);
+app.use('/exams', examRoutes);
+app.use('/results', resultRoutes);
+app.use('/certificates', certificateRoutes);
+app.use('/leaderboard', leaderboardRoutes);
+app.use('/profile', profileRoutes);
+app.use('/admin', adminRoutes);
+app.use('/settings', settingsRoutes);
+app.use('/logs', logsRoutes);
+app.use('/payments', paymentRoutes);
+app.use('/instructor', instructorRoutes);
+
 app.get('/api/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
+app.get('/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
 app.use('*', (req, res) => res.status(404).json({ message: `Route ${req.originalUrl} not found` }));
 app.use(errorHandler);
 
