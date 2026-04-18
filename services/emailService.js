@@ -3,7 +3,7 @@ import logger from '../utils/logger.js';
 
 let _resend = null;
 const getResend = () => { if (!_resend) _resend = new Resend(process.env.RESEND_API_KEY); return _resend; };
-const FROM = process.env.EMAIL_FROM || 'ExamsPrep - Abbas Logic <no-reply@abbaslogic.com>';
+const FROM = process.env.EMAIL_FROM || 'ExamPrep <no-reply@abbaslogic.com>';
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 const BRAND = 'ExamPrep AI';
 const PRIMARY = '#0366AC';

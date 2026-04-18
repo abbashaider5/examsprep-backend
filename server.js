@@ -28,6 +28,7 @@ import resultRoutes from './routes/result.js';
 import settingsRoutes from './routes/settings.js';
 import paymentRoutes from './routes/payment.js';
 import instructorRoutes from './routes/instructor.js';
+import feedbackRoutes from './routes/feedback.js';
 
 const app = express();
 connectDB();
@@ -94,6 +95,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/logs', logsRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/instructor', instructorRoutes);
+app.use('/api/feedback', feedbackRoutes);
 
 // Bare-path fallback (handles VITE_API_URL set without /api suffix)
 app.use(apiLimiter);
@@ -108,6 +110,7 @@ app.use('/settings', settingsRoutes);
 app.use('/logs', logsRoutes);
 app.use('/payments', paymentRoutes);
 app.use('/instructor', instructorRoutes);
+app.use('/feedback', feedbackRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
 app.get('/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
