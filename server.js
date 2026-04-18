@@ -5,8 +5,13 @@ import express from 'express';
 import mongoSanitize from 'express-mongo-sanitize';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 import { validateEnv } from './utils/validateEnv.js';
 validateEnv();
@@ -117,6 +122,27 @@ app.use('/contact', contactRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
 app.get('/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
+
+// ── Serve React frontend in production ───────────────────────────────────────
+const clientDist = path.join(__dirname, '../client/dist');
+app.use(express.static(clientDist, { maxAge: '1d' }));
+// SPA fallback — send index.html for any non-API route
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api/') || req.path.startsWith('/auth') || req.path.startsWith('/exams')
+    || req.path.startsWith('/results') || req.path.startsWith('/certificates')
+    || req.path.startsWith('/leaderboard') || req.path.startsWith('/profile')
+    || req.path.startsWith('/admin') || req.path.startsWith('/settings')
+    || req.path.startsWith('/logs') || req.path.startsWith('/payments')
+    || req.path.startsWith('/instructor') || req.path.startsWith('/feedback')
+    || req.path.startsWith('/contact') || req.path === '/health') {
+    return next();
+  }
+  const indexFile = path.join(clientDist, 'index.html');
+  res.sendFile(indexFile, (err) => {
+    if (err) next(); // file not found — don't crash in dev
+  });
+});
+
 app.use('*', (req, res) => res.status(404).json({ message: `Route ${req.originalUrl} not found` }));
 app.use(errorHandler);
 

@@ -1,18 +1,75 @@
 import Feedback from '../models/Feedback.js';
 
+const DAILY_LIMIT = 2;
+const TOTAL_LIMIT = 10;
+
 export const submitFeedback = async (req, res, next) => {
   try {
     const { rating, message, trigger } = req.body;
     if (!rating || rating < 1 || rating > 5) {
       return res.status(400).json({ message: 'Rating must be between 1 and 5' });
     }
+
+    const userId = req.user._id;
+
+    // ── Total limit ──────────────────────────────────────────────────────────
+    const totalCount = await Feedback.countDocuments({ user: userId });
+    if (totalCount >= TOTAL_LIMIT) {
+      return res.status(429).json({
+        message: `You've reached the maximum of ${TOTAL_LIMIT} feedback submissions. Thank you for your continued support!`,
+        code: 'TOTAL_LIMIT_REACHED',
+      });
+    }
+
+    // ── Daily limit ──────────────────────────────────────────────────────────
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const todayCount = await Feedback.countDocuments({
+      user: userId,
+      createdAt: { $gte: startOfDay },
+    });
+    if (todayCount >= DAILY_LIMIT) {
+      return res.status(429).json({
+        message: `You've already submitted ${DAILY_LIMIT} feedbacks today. Come back tomorrow!`,
+        code: 'DAILY_LIMIT_REACHED',
+      });
+    }
+
     const fb = await Feedback.create({
-      user: req.user._id,
+      user: userId,
       rating: Number(rating),
       message: message?.trim() || '',
-      trigger: trigger || 'exam_completed',
+      trigger: trigger || 'general',
     });
-    res.status(201).json({ feedback: fb });
+
+    res.status(201).json({
+      feedback: fb,
+      remaining: {
+        today: DAILY_LIMIT - todayCount - 1,
+        total: TOTAL_LIMIT - totalCount - 1,
+      },
+    });
+  } catch (err) { next(err); }
+};
+
+export const getFeedbackLimits = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const [totalCount, todayCount] = await Promise.all([
+      Feedback.countDocuments({ user: userId }),
+      Feedback.countDocuments({ user: userId, createdAt: { $gte: startOfDay } }),
+    ]);
+
+    res.json({
+      canSubmit: totalCount < TOTAL_LIMIT && todayCount < DAILY_LIMIT,
+      todayUsed: todayCount,
+      todayLimit: DAILY_LIMIT,
+      totalUsed: totalCount,
+      totalLimit: TOTAL_LIMIT,
+    });
   } catch (err) { next(err); }
 };
 
