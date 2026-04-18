@@ -229,6 +229,24 @@ export const sendPlanChangeEmail = async ({ email, name, oldPlan, newPlan, chang
   await send(email, isUpgrade ? `Plan Upgraded to ${newPlan}` : `Plan Updated — ${BRAND}`, html);
 };
 
+// ── 9. Contact Reply ──────────────────────────────────────────────────────────
+export const sendContactReplyEmail = async ({ email, name, originalMessage, reply }) => {
+  const html = layout(`
+    <h2 style="margin:0 0 6px;font-size:20px;color:#0f172a;">We've replied to your query</h2>
+    <p style="color:#475569;font-size:13px;line-height:1.6;margin:0 0 16px;">Hi <strong>${name}</strong>, here's our response to your message.</p>
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:14px 16px;margin-bottom:16px;">
+      <p style="margin:0 0 4px;font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;">Your original message</p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">${originalMessage}</p>
+    </div>
+    <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:14px 16px;margin-bottom:20px;">
+      <p style="margin:0 0 4px;font-size:11px;font-weight:600;color:#2563eb;text-transform:uppercase;">Our reply</p>
+      <p style="margin:0;font-size:13px;color:#1e3a5f;line-height:1.6;">${reply}</p>
+    </div>
+    <p style="font-size:12px;color:#94a3b8;margin:0;">If you have further questions, feel free to contact us again at <a href="${CLIENT_URL}/contact" style="color:${PRIMARY};">our contact page</a>.</p>
+  `, `Reply to your query on ${BRAND}`);
+  await send(email, `Re: Your query — ${BRAND}`, html);
+};
+
 // ── Internal send helper ──────────────────────────────────────────────────────
 async function send(to, subject, html, attachments = []) {
   try {

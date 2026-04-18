@@ -4,6 +4,9 @@ import {
   getPublicExams, getStats, getUsers, toggleBlockUser,
   updateUserPlan, updateUserRole,
 } from '../controllers/adminController.js';
+import {
+  getContacts, updateContactStatus, replyToContact, deleteContact,
+} from '../controllers/contactController.js';
 import { protect, requireAdmin } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -18,5 +21,11 @@ router.delete('/users/:id', deleteUser);
 router.get('/exams/public', getPublicExams);
 router.get('/transactions', getAdminTransactions);
 router.get('/subscriptions', getAdminSubscriptions);
+
+// Contact query management
+router.get('/contacts', getContacts);
+router.patch('/contacts/:id/status', updateContactStatus);
+router.post('/contacts/:id/reply', replyToContact);
+router.delete('/contacts/:id', deleteContact);
 
 export default router;

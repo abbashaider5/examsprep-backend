@@ -37,13 +37,13 @@ export const requireInstructor = (req, res, next) => {
 
 export const signAccessToken = (userId) => {
   return jwt.sign({ id: userId }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '15m',
+    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
   });
 };
 
 export const signRefreshToken = (userId) => {
   return jwt.sign({ id: userId }, process.env.JWT_REFRESH_SECRET, {
-    expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
+    expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d',
   });
 };
 
@@ -61,8 +61,8 @@ const cookieOpts = (maxAge) => ({
 export const setAuthCookies = (res, userId) => {
   const accessToken = signAccessToken(userId);
   const refreshToken = signRefreshToken(userId);
-  res.cookie('accessToken', accessToken, cookieOpts(15 * 60 * 1000));
-  res.cookie('refreshToken', refreshToken, cookieOpts(7 * 24 * 60 * 60 * 1000));
+  res.cookie('accessToken', accessToken, cookieOpts(7 * 24 * 60 * 60 * 1000));
+  res.cookie('refreshToken', refreshToken, cookieOpts(30 * 24 * 60 * 60 * 1000));
   return { accessToken, refreshToken };
 };
 

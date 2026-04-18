@@ -142,7 +142,7 @@ export const refreshAccessToken = async (req, res, next) => {
     res.cookie('accessToken', accessToken, {
       httpOnly: true, secure: isProd(),
       sameSite: isProd() ? 'none' : 'lax',
-      maxAge: 15 * 60 * 1000,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     });
     res.json({ message: 'Token refreshed' });
   } catch (err) {
