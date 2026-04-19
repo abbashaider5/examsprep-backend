@@ -35,6 +35,7 @@ import paymentRoutes from './routes/payment.js';
 import instructorRoutes from './routes/instructor.js';
 import feedbackRoutes from './routes/feedback.js';
 import contactRoutes from './routes/contact.js';
+import announcementRoutes from './routes/announcements.js';
 
 const app = express();
 connectDB();
@@ -103,6 +104,7 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/instructor', instructorRoutes);
 app.use('/api/feedback', feedbackRoutes);
 app.use('/api/contact', contactRoutes);
+app.use('/api/announcements', announcementRoutes);
 
 // Bare-path fallback (handles VITE_API_URL set without /api suffix)
 app.use(apiLimiter);
@@ -119,6 +121,7 @@ app.use('/payments', paymentRoutes);
 app.use('/instructor', instructorRoutes);
 app.use('/feedback', feedbackRoutes);
 app.use('/contact', contactRoutes);
+app.use('/announcements', announcementRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
 app.get('/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
@@ -138,7 +141,8 @@ app.get('*', (req, res, next) => {
     || req.path.startsWith('/admin') || req.path.startsWith('/settings')
     || req.path.startsWith('/logs') || req.path.startsWith('/payments')
     || req.path.startsWith('/instructor') || req.path.startsWith('/feedback')
-    || req.path.startsWith('/contact') || req.path === '/health') {
+    || req.path.startsWith('/contact') || req.path.startsWith('/announcements')
+    || req.path === '/health') {
     return next();
   }
   // Let express.static handle known asset types — don't override with index.html
