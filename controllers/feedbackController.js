@@ -92,6 +92,7 @@ export const getFeedback = async (req, res, next) => {
       .sort({ createdAt: -1 })
       .limit(200);
 
+    // ── Overall distribution & average ────────────────────────────────────────
     const ratingsAgg = await Feedback.aggregate([
       { $group: { _id: '$rating', count: { $sum: 1 } } },
       { $sort: { _id: 1 } },
@@ -106,7 +107,58 @@ export const getFeedback = async (req, res, next) => {
     const total = feedback.length;
     const avg = total > 0 ? (sum / total).toFixed(1) : '0.0';
 
-    res.json({ feedback, stats: { avg, total, distribution } });
+    // ── Per-category averages ─────────────────────────────────────────────────
+    const categoryAgg = await Feedback.aggregate([
+      { $match: { 'ratings': { $exists: true } } },
+      {
+        $group: {
+          _id: null,
+          avgUi:          { $avg: '$ratings.ui' },
+          avgPerformance: { $avg: '$ratings.performance' },
+          avgFeatures:    { $avg: '$ratings.features' },
+          countWithRatings: { $sum: 1 },
+        },
+      },
+    ]);
+    const catData = categoryAgg[0] || {};
+    const categoryAvg = {
+      ui:          catData.avgUi          ? Number(catData.avgUi.toFixed(1))          : null,
+      performance: catData.avgPerformance ? Number(catData.avgPerformance.toFixed(1)) : null,
+      features:    catData.avgFeatures    ? Number(catData.avgFeatures.toFixed(1))    : null,
+      count:       catData.countWithRatings || 0,
+    };
+
+    // ── Submissions trend — last 30 days ──────────────────────────────────────
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 29);
+    thirtyDaysAgo.setHours(0, 0, 0, 0);
+
+    const trendAgg = await Feedback.aggregate([
+      { $match: { createdAt: { $gte: thirtyDaysAgo } } },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          count: { $sum: 1 },
+          avgRating: { $avg: '$rating' },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    // ── Reply rate ────────────────────────────────────────────────────────────
+    const repliedCount = feedback.filter(f => f.adminReply).length;
+
+    res.json({
+      feedback,
+      stats: {
+        avg,
+        total,
+        distribution,
+        categoryAvg,
+        trend: trendAgg.map(t => ({ date: t._id, count: t.count, avgRating: Number(t.avgRating.toFixed(1)) })),
+        repliedCount,
+      },
+    });
   } catch (err) { next(err); }
 };
 
