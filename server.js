@@ -126,7 +126,11 @@ app.get('/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_
 // ── Serve React frontend in production ───────────────────────────────────────
 const clientDist = path.join(__dirname, '../client/dist');
 app.use(express.static(clientDist, { maxAge: '1d' }));
-// SPA fallback — send index.html for any non-API route
+
+// Static asset extensions — never serve index.html for these
+const STATIC_EXT = /\.(png|jpg|jpeg|gif|svg|ico|webp|avif|woff|woff2|ttf|eot|otf|css|js|mjs|map|json|txt|xml)$/i;
+
+// SPA fallback — send index.html for any non-API, non-asset route
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/auth') || req.path.startsWith('/exams')
     || req.path.startsWith('/results') || req.path.startsWith('/certificates')
@@ -137,6 +141,8 @@ app.get('*', (req, res, next) => {
     || req.path.startsWith('/contact') || req.path === '/health') {
     return next();
   }
+  // Let express.static handle known asset types — don't override with index.html
+  if (STATIC_EXT.test(req.path)) return next();
   const indexFile = path.join(clientDist, 'index.html');
   res.sendFile(indexFile, (err) => {
     if (err) next(); // file not found — don't crash in dev

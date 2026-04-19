@@ -5,8 +5,15 @@ const TOTAL_LIMIT = 10;
 
 export const submitFeedback = async (req, res, next) => {
   try {
-    const { rating, message, trigger } = req.body;
-    if (!rating || rating < 1 || rating > 5) {
+    const { rating, ratings, message, trigger } = req.body;
+
+    // Compute overall rating — either direct or averaged from sub-ratings
+    let overallRating = rating ? Number(rating) : null;
+    if (ratings && (ratings.ui || ratings.performance || ratings.features)) {
+      const vals = [ratings.ui, ratings.performance, ratings.features].filter(Boolean).map(Number);
+      overallRating = Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
+    }
+    if (!overallRating || overallRating < 1 || overallRating > 5) {
       return res.status(400).json({ message: 'Rating must be between 1 and 5' });
     }
 
@@ -37,7 +44,12 @@ export const submitFeedback = async (req, res, next) => {
 
     const fb = await Feedback.create({
       user: userId,
-      rating: Number(rating),
+      rating: overallRating,
+      ratings: ratings ? {
+        ui:          ratings.ui ? Number(ratings.ui) : undefined,
+        performance: ratings.performance ? Number(ratings.performance) : undefined,
+        features:    ratings.features ? Number(ratings.features) : undefined,
+      } : undefined,
       message: message?.trim() || '',
       trigger: trigger || 'general',
     });
