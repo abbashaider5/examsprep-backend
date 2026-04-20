@@ -36,6 +36,7 @@ import instructorRoutes from './routes/instructor.js';
 import feedbackRoutes from './routes/feedback.js';
 import contactRoutes from './routes/contact.js';
 import announcementRoutes from './routes/announcements.js';
+import groupRoutes from './routes/groups.js';
 
 const app = express();
 connectDB();
@@ -105,6 +106,7 @@ app.use('/api/instructor', instructorRoutes);
 app.use('/api/feedback', feedbackRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/announcements', announcementRoutes);
+app.use('/api/groups', groupRoutes);
 
 // Bare-path fallback (handles VITE_API_URL set without /api suffix)
 app.use(apiLimiter);
@@ -122,6 +124,7 @@ app.use('/instructor', instructorRoutes);
 app.use('/feedback', feedbackRoutes);
 app.use('/contact', contactRoutes);
 app.use('/announcements', announcementRoutes);
+app.use('/groups', groupRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
 app.get('/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
@@ -142,6 +145,7 @@ app.get('*', (req, res, next) => {
     || req.path.startsWith('/logs') || req.path.startsWith('/payments')
     || req.path.startsWith('/instructor') || req.path.startsWith('/feedback')
     || req.path.startsWith('/contact') || req.path.startsWith('/announcements')
+    || req.path.startsWith('/groups')
     || req.path === '/health') {
     return next();
   }

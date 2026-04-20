@@ -1,6 +1,7 @@
 import { AppError } from '../middleware/errorHandler.js';
 import Exam from '../models/Exam.js';
 import ExamInvite from '../models/ExamInvite.js';
+import Group from '../models/Group.js';
 import Result from '../models/Result.js';
 import Screenshot from '../models/Screenshot.js';
 import User from '../models/User.js';
@@ -147,7 +148,161 @@ export const getInstructorAnalytics = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// POST /api/instructor/invite/:token/accept
+// GET /api/instructor/analytics/detailed
+export const getDetailedAnalytics = async (req, res, next) => {
+  try {
+    const exams = await Exam.find({ createdBy: req.user._id }).sort({ createdAt: -1 }).lean();
+    const examIds = exams.map(e => e._id);
+
+    // All results for instructor's exams with user info
+    const results = await Result.find({ exam: { $in: examIds } })
+      .populate('user', 'name email')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Time series — results per day last 30 days
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const timeSeries = await Result.aggregate([
+      { $match: { exam: { $in: examIds }, createdAt: { $gte: thirtyDaysAgo } } },
+      {
+        $group: {
+          _id:      { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          attempts: { $sum: 1 },
+          avgScore: { $avg: '$percentage' },
+          passed:   { $sum: { $cond: ['$passed', 1, 0] } },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    // Subject breakdown (pass rate by subject)
+    const subjectBreakdown = await Result.aggregate([
+      { $match: { exam: { $in: examIds } } },
+      { $lookup: { from: 'exams', localField: 'exam', foreignField: '_id', as: 'examData' } },
+      { $unwind: '$examData' },
+      {
+        $group: {
+          _id:       '$examData.subject',
+          count:     { $sum: 1 },
+          avgScore:  { $avg: '$percentage' },
+          passCount: { $sum: { $cond: ['$passed', 1, 0] } },
+        },
+      },
+      { $sort: { count: -1 } },
+    ]);
+
+    // Per-exam stats
+    const examMap = Object.fromEntries(exams.map(e => [e._id.toString(), e]));
+    const examStatsMap = {};
+    for (const r of results) {
+      const eid = r.exam.toString();
+      if (!examStatsMap[eid]) examStatsMap[eid] = { count: 0, total: 0, pass: 0 };
+      examStatsMap[eid].count++;
+      examStatsMap[eid].total += r.percentage;
+      if (r.passed) examStatsMap[eid].pass++;
+    }
+    const examStats = exams.map(e => {
+      const s = examStatsMap[e._id.toString()] || { count: 0, total: 0, pass: 0 };
+      return {
+        _id: e._id, title: e.title, subject: e.subject, difficulty: e.difficulty,
+        attempts:  s.count,
+        avgScore:  s.count ? Math.round(s.total / s.count) : 0,
+        passCount: s.pass,
+        passRate:  s.count ? Math.round((s.pass / s.count) * 100) : 0,
+        createdAt: e.createdAt,
+      };
+    });
+
+    // Per-student performance
+    const studentMap = {};
+    for (const r of results) {
+      const uid = r.user?._id?.toString();
+      if (!uid) continue;
+      if (!studentMap[uid]) {
+        studentMap[uid] = {
+          user:     { _id: r.user._id, name: r.user.name, email: r.user.email },
+          attempts: 0, totalScore: 0, passCount: 0, exams: [],
+        };
+      }
+      studentMap[uid].attempts++;
+      studentMap[uid].totalScore += r.percentage;
+      if (r.passed) studentMap[uid].passCount++;
+      studentMap[uid].exams.push({
+        examId:    r.exam,
+        examTitle: examMap[r.exam.toString()]?.title || 'Unknown',
+        score:     r.percentage,
+        passed:    r.passed,
+        timeTaken: r.timeTaken,
+        date:      r.createdAt,
+      });
+    }
+    const studentPerformance = Object.values(studentMap)
+      .map(s => ({
+        ...s,
+        avgScore: s.attempts > 0 ? Math.round(s.totalScore / s.attempts) : 0,
+        passRate: s.attempts > 0 ? Math.round((s.passCount / s.attempts) * 100) : 0,
+      }))
+      .sort((a, b) => b.avgScore - a.avgScore);
+
+    const totalAttempts  = results.length;
+    const overallAvg     = totalAttempts ? Math.round(results.reduce((a, r) => a + r.percentage, 0) / totalAttempts) : 0;
+    const overallPass    = totalAttempts ? Math.round((results.filter(r => r.passed).length / totalAttempts) * 100) : 0;
+
+    res.json({
+      summary: {
+        totalExams:    exams.length,
+        totalAttempts,
+        avgScore:      overallAvg,
+        passRate:      overallPass,
+        totalStudents: Object.keys(studentMap).length,
+      },
+      examStats,
+      timeSeries,
+      subjectBreakdown,
+      studentPerformance,
+    });
+  } catch (err) { next(err); }
+};
+export const sendGroupInvite = async (req, res, next) => {
+  try {
+    const { groupId } = req.body;
+    if (!groupId) return next(new AppError('groupId is required', 400));
+
+    const exam = await Exam.findOne({ _id: req.params.examId, createdBy: req.user._id });
+    if (!exam) return next(new AppError('Exam not found or unauthorized', 404));
+
+    const group = await Group.findById(groupId).populate('members', 'email name');
+    if (!group) return next(new AppError('Group not found', 404));
+    if (group.instructor.toString() !== req.user._id.toString()) {
+      return next(new AppError('Not your group', 403));
+    }
+
+    const emails = group.members.map(m => m.email);
+    const settings = await getSettings();
+    const inviteUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/exam/${exam._id}`;
+
+    let sent = 0, skipped = 0;
+    for (const email of emails) {
+      const existing = await ExamInvite.findOne({ exam: exam._id, email, status: { $ne: 'expired' } });
+      if (existing) { skipped++; continue; }
+      const invite = await ExamInvite.create({ exam: exam._id, invitedBy: req.user._id, email });
+      sent++;
+      if (settings.emailInstructorInviteEnabled) {
+        const member = group.members.find(m => m.email === email);
+        sendInstructorInviteEmail({
+          email,
+          instructorName: req.user.name,
+          examTitle: exam.title,
+          examSubject: exam.subject,
+          inviteUrl: `${inviteUrl}?invite=${invite.token}`,
+          expiresAt: invite.expiresAt.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }),
+        }).catch(logger.error);
+      }
+    }
+
+    res.json({ message: `Invites sent to ${sent} member${sent !== 1 ? 's' : ''}. ${skipped} already invited.`, sent, skipped });
+  } catch (err) { next(err); }
+};
 export const acceptInvite = async (req, res, next) => {
   try {
     const invite = await ExamInvite.findOne({ token: req.params.token })

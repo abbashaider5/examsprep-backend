@@ -43,3 +43,27 @@ export const uploadScreenshot = async (base64DataUri, folder = 'examprep/screens
     return null;
   }
 };
+
+/**
+ * Upload any base64 data URI (image or raw file) to Cloudinary.
+ * Used for group chat media.
+ * Returns { url, publicId, resourceType } or null.
+ */
+export const uploadGroupMedia = async (base64DataUri, originalName = 'file') => {
+  if (!isCloudinaryConfigured()) return null;
+  try {
+    const isImage = /^data:image\//i.test(base64DataUri);
+    const resourceType = isImage ? 'image' : 'raw';
+
+    const result = await cloudinary.uploader.upload(base64DataUri, {
+      folder: 'examprep/group-media',
+      resource_type: resourceType,
+      ...(isImage ? { quality: 80, width: 1280, crop: 'limit' } : {}),
+      public_id: `${Date.now()}_${originalName.replace(/[^a-z0-9._-]/gi, '_')}`,
+    });
+    return { url: result.secure_url, publicId: result.public_id, resourceType };
+  } catch (err) {
+    logger.error(`[Cloudinary] Group media upload failed: ${err.message}`);
+    return null;
+  }
+};

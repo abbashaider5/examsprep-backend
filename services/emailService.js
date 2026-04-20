@@ -208,7 +208,22 @@ export const sendInstructorInviteEmail = async ({ email, instructorName, examTit
   await send(email, `Exam Invite: ${examTitle}`, html);
 };
 
-// ── 8. Plan Change ────────────────────────────────────────────────────────────
+// ── 8. Group Invite ───────────────────────────────────────────────────────────
+export const sendGroupInviteEmail = async ({ email, instructorName, groupName, acceptUrl, expiresAt }) => {
+  const html = layout(`
+    <h2 style="margin:0 0 6px;font-size:20px;color:#0f172a;">You've been invited to a group</h2>
+    <p style="color:#475569;font-size:13px;margin:0 0 16px;"><strong>${instructorName}</strong> has invited you to join the study group <strong>${groupName}</strong> on <strong>${BRAND}</strong>.</p>
+    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
+      <p style="margin:0;font-size:14px;font-weight:700;color:#15803d;">${groupName}</p>
+      <p style="margin:4px 0 0;font-size:12px;color:#64748b;">Instructor: <strong>${instructorName}</strong></p>
+    </div>
+    <div style="text-align:center;margin-bottom:12px;">${btn(acceptUrl, 'Accept Invitation', '#16a34a')}</div>
+    <p style="font-size:11px;color:#94a3b8;text-align:center;margin:0;">Invite expires on ${expiresAt}. You may need to log in or create an account to accept.</p>
+  `, `Group invitation: ${groupName}`);
+  await send(email, `Group Invite: ${groupName}`, html);
+};
+
+// ── 9. Plan Change ────────────────────────────────────────────────────────────
 export const sendPlanChangeEmail = async ({ email, name, oldPlan, newPlan, changedBy = 'admin' }) => {
   const ranks = { free: 0, pro: 1, enterprise: 2 };
   const isUpgrade = (ranks[newPlan] ?? 0) > (ranks[oldPlan] ?? 0);
