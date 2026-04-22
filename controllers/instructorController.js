@@ -140,6 +140,10 @@ export const getInstructorAnalytics = async (req, res, next) => {
     const examsWithStats = exams.map(e => ({
       _id: e._id, title: e.title, subject: e.subject,
       difficulty: e.difficulty, timesAttempted: e.timesAttempted,
+      proctored: e.proctored, certificate: e.certificate,
+      allowReattempt: e.allowReattempt, showAnswersAfter: e.showAnswersAfter,
+      passingPercentage: e.passingPercentage, expiryDate: e.expiryDate,
+      questions: e.questions, questionCount: e.questions?.length || 0,
       inviteCount: 0, acceptedCount: 0,
       stats: resultMap[e._id.toString()] || { count: 0, avgScore: 0, passCount: 0 },
     }));

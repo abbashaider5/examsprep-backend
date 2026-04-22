@@ -112,6 +112,7 @@ export async function updateGroup(req, res) {
     const { name, description } = req.body;
     if (name?.trim()) group.name = name.trim();
     if (description !== undefined) group.description = description.trim();
+    group.sharedExams = group.sharedExams.filter(se => se.exam != null);
     await group.save();
     res.json({ group });
   } catch (err) {
@@ -134,6 +135,7 @@ export async function updateGroupSettings(req, res) {
     if (allowReplies       !== undefined) group.settings.allowReplies       = !!allowReplies;
     if (maxMembers         !== undefined) group.settings.maxMembers         = Number(maxMembers) || 100;
     if (muteNotifications  !== undefined) group.settings.muteNotifications  = !!muteNotifications;
+    group.sharedExams = group.sharedExams.filter(se => se.exam != null);
     await group.save();
     res.json({ group });
   } catch (err) {
@@ -367,10 +369,14 @@ export async function shareExam(req, res) {
       return res.status(403).json({ message: 'Not your group' });
     }
     const { examId } = req.body;
+    if (!examId) return res.status(400).json({ message: 'examId is required' });
     const exam = await Exam.findById(examId);
     if (!exam) return res.status(404).json({ message: 'Exam not found' });
 
-    if (!group.sharedExams.some(se => se.exam.toString() === examId)) {
+    // Purge any invalid entries before touching sharedExams
+    group.sharedExams = group.sharedExams.filter(se => se.exam != null);
+
+    if (!group.sharedExams.some(se => se.exam?.toString() === examId.toString())) {
       group.sharedExams.push({ exam: examId });
       await group.save();
     }
