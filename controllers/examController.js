@@ -1,6 +1,7 @@
 import { AppError } from '../middleware/errorHandler.js';
 import Exam from '../models/Exam.js';
 import ExamInvite from '../models/ExamInvite.js';
+import Group from '../models/Group.js';
 import Screenshot from '../models/Screenshot.js';
 import User from '../models/User.js';
 import { generateCodingQuestions, generateMCQs } from '../services/aiService.js';
@@ -13,7 +14,7 @@ export const createExam = async (req, res, next) => {
       title, subject, difficulty, numQuestions, topics, proctored,
       passingPercentage, allowReattempt, showFlashcards, showReview,
       certificateEnabled, screenshotEnabled, enableCoding, allowCodeExecution,
-      showResultToUser, showAnswersToUser,
+      showResultToUser, showAnswersToUser, expiryDate,
     } = req.body;
     const user = req.user;
 
@@ -62,6 +63,7 @@ export const createExam = async (req, res, next) => {
       allowCodeExecution:  Boolean(allowCodeExecution),
       showResultToUser:    showResultToUser   !== undefined ? Boolean(showResultToUser)   : true,
       showAnswersToUser:   showAnswersToUser  !== undefined ? Boolean(showAnswersToUser)  : true,
+      expiryDate:          expiryDate ? new Date(expiryDate) : null,
     });
 
     user.examsCreatedThisMonth = (user.examsCreatedThisMonth || 0) + 1;
@@ -98,6 +100,33 @@ export const updateExam = async (req, res, next) => {
       exam.passingPercentage = Math.max(1, Math.min(100, Number(req.body.passingPercentage) || 75));
     }
 
+    // Expiry: empty string or null means lifetime (no expiry)
+    if (req.body.expiryDate !== undefined) {
+      exam.expiryDate = req.body.expiryDate ? new Date(req.body.expiryDate) : null;
+    }
+
+    await exam.save();
+    res.json({ exam });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** PUT /api/exams/:id/questions — replace the questions array (instructor edit) */
+export const updateQuestions = async (req, res, next) => {
+  try {
+    const exam = await Exam.findById(req.params.id);
+    if (!exam) return next(new AppError('Exam not found', 404));
+    if (exam.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return next(new AppError('Not authorized', 403));
+    }
+
+    const { questions } = req.body;
+    if (!Array.isArray(questions) || questions.length === 0) {
+      return next(new AppError('questions array is required', 400));
+    }
+
+    exam.questions = questions;
     await exam.save();
     res.json({ exam });
   } catch (err) {
@@ -211,12 +240,27 @@ export const getExamById = async (req, res, next) => {
     if (!exam) return next(new AppError('Exam not found', 404));
     const isOwner = exam.createdBy.toString() === req.user._id.toString();
     if (!exam.isPublic && !isOwner && req.user.role !== 'admin') {
+      // Check individual invite
       const invite = await ExamInvite.findOne({
         exam: exam._id,
         email: req.user.email.toLowerCase(),
         status: 'accepted',
       });
-      if (!invite) return next(new AppError('Not authorized to view this exam', 403));
+      if (!invite) {
+        // Check if exam is shared in any group where the user is a member
+        const inGroup = await Group.exists({
+          'sharedExams.exam': exam._id,
+          $or: [
+            { members: req.user._id },
+            { instructor: req.user._id },
+          ],
+        });
+        if (!inGroup) return next(new AppError('Not authorized to view this exam', 403));
+      }
+    }
+    // Check expiry (skip for owner and admin)
+    if (!isOwner && req.user.role !== 'admin' && exam.expiryDate && new Date(exam.expiryDate) < new Date()) {
+      return next(new AppError('This test has expired', 403));
     }
     res.json({ exam });
   } catch (err) {

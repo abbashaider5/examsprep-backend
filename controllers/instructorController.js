@@ -248,6 +248,30 @@ export const getDetailedAnalytics = async (req, res, next) => {
     const overallAvg     = totalAttempts ? Math.round(results.reduce((a, r) => a + r.percentage, 0) / totalAttempts) : 0;
     const overallPass    = totalAttempts ? Math.round((results.filter(r => r.passed).length / totalAttempts) * 100) : 0;
 
+    // Group-wise performance
+    const instructorGroups = await Group.find({ instructor: req.user._id }).lean();
+    const groupPerformance = instructorGroups.map(g => {
+      const memberIds = (g.members || []).map(id => id.toString());
+      const groupStudents = studentPerformance.filter(s => memberIds.includes(s.user._id.toString()));
+      const groupAttempts = groupStudents.reduce((a, s) => a + s.attempts, 0);
+      const groupAvg = groupStudents.length > 0
+        ? Math.round(groupStudents.reduce((a, s) => a + s.avgScore, 0) / groupStudents.length)
+        : 0;
+      const groupPassRate = groupStudents.length > 0
+        ? Math.round(groupStudents.reduce((a, s) => a + s.passRate, 0) / groupStudents.length)
+        : 0;
+      return {
+        _id: g._id,
+        name: g.name,
+        memberCount: g.members?.length || 0,
+        activeStudents: groupStudents.length,
+        totalAttempts: groupAttempts,
+        avgScore: groupAvg,
+        passRate: groupPassRate,
+        students: groupStudents,
+      };
+    });
+
     res.json({
       summary: {
         totalExams:    exams.length,
@@ -260,6 +284,7 @@ export const getDetailedAnalytics = async (req, res, next) => {
       timeSeries,
       subjectBreakdown,
       studentPerformance,
+      groupPerformance,
     });
   } catch (err) { next(err); }
 };
@@ -285,7 +310,7 @@ export const sendGroupInvite = async (req, res, next) => {
     for (const email of emails) {
       const existing = await ExamInvite.findOne({ exam: exam._id, email, status: { $ne: 'expired' } });
       if (existing) { skipped++; continue; }
-      const invite = await ExamInvite.create({ exam: exam._id, invitedBy: req.user._id, email });
+      const invite = await ExamInvite.create({ exam: exam._id, invitedBy: req.user._id, email, group: groupId });
       sent++;
       if (settings.emailInstructorInviteEnabled) {
         const member = group.members.find(m => m.email === email);
@@ -368,8 +393,9 @@ export const getMyAcceptedInvites = async (req, res, next) => {
       email: req.user.email.toLowerCase(),
       status: 'accepted',
     })
-      .populate('exam', 'title subject difficulty questions proctored timePerQuestion showFlashcards showReview allowReattempt certificateEnabled passingPercentage')
+      .populate('exam', 'title subject difficulty questions proctored timePerQuestion showFlashcards showReview allowReattempt certificateEnabled passingPercentage topics expiryDate')
       .populate('invitedBy', 'name')
+      .populate('group', 'name')
       .sort({ updatedAt: -1 });
     res.json({ invites });
   } catch (err) { next(err); }

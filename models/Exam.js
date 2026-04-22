@@ -46,6 +46,8 @@ const examSchema = new mongoose.Schema({
   // Result visibility controls
   showResultToUser:    { type: Boolean, default: true },
   showAnswersToUser:   { type: Boolean, default: true },
+  // Expiry
+  expiryDate:          { type: Date, default: null },
 }, { timestamps: true });
 
 examSchema.pre('save', function (next) {

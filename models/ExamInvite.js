@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 const examInviteSchema = new mongoose.Schema({
   exam: { type: mongoose.Schema.Types.ObjectId, ref: 'Exam', required: true },
   invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', default: null },
   email: { type: String, required: true, lowercase: true, trim: true },
   token: { type: String, unique: true, default: () => crypto.randomBytes(32).toString('hex') },
   status: { type: String, enum: ['pending', 'accepted', 'expired'], default: 'pending' },

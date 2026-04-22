@@ -3,6 +3,7 @@ import Group from '../models/Group.js';
 import GroupInvite from '../models/GroupInvite.js';
 import GroupMessage from '../models/GroupMessage.js';
 import User from '../models/User.js';
+import { createNotificationsForUsers } from './notificationController.js';
 import { uploadGroupMedia } from '../services/cloudinaryService.js';
 import { sendGroupInviteEmail } from '../services/emailService.js';
 import logger from '../utils/logger.js';
@@ -56,13 +57,13 @@ export async function getMyGroups(req, res) {
     if (isInstructor(req.user)) {
       groups = await Group.find({ instructor: req.user._id, isActive: true })
         .populate('members', 'name email')
-        .populate('sharedExams', 'title subject difficulty')
+        .populate({ path: 'sharedExams.exam', select: 'title subject difficulty' })
         .sort({ createdAt: -1 })
         .lean();
     } else {
       groups = await Group.find({ members: req.user._id, isActive: true })
         .populate('instructor', 'name email role')
-        .populate('sharedExams', 'title subject difficulty')
+        .populate({ path: 'sharedExams.exam', select: 'title subject difficulty' })
         .sort({ createdAt: -1 })
         .lean();
     }
@@ -90,7 +91,7 @@ export async function getGroup(req, res) {
     const populated = await Group.findById(group._id)
       .populate('instructor', 'name email role')
       .populate('members', 'name email role')
-      .populate('sharedExams', 'title subject difficulty questions passingPercentage')
+      .populate({ path: 'sharedExams.exam', select: 'title subject difficulty questions passingPercentage allowReattempt expiryDate' })
       .lean();
 
     // Attach pending invites count
@@ -125,10 +126,14 @@ export async function updateGroupSettings(req, res) {
     if (group.instructor.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({ message: 'Not your group' });
     }
-    const { allowMedia, whoCanSend, isPrivate } = req.body;
-    if (allowMedia  !== undefined) group.settings.allowMedia  = !!allowMedia;
-    if (whoCanSend  !== undefined) group.settings.whoCanSend  = whoCanSend;
-    if (isPrivate   !== undefined) group.settings.isPrivate   = !!isPrivate;
+    const { allowMedia, whoCanSend, isPrivate, allowReactions, allowReplies, maxMembers, muteNotifications } = req.body;
+    if (allowMedia         !== undefined) group.settings.allowMedia         = !!allowMedia;
+    if (whoCanSend         !== undefined) group.settings.whoCanSend         = whoCanSend;
+    if (isPrivate          !== undefined) group.settings.isPrivate          = !!isPrivate;
+    if (allowReactions     !== undefined) group.settings.allowReactions     = !!allowReactions;
+    if (allowReplies       !== undefined) group.settings.allowReplies       = !!allowReplies;
+    if (maxMembers         !== undefined) group.settings.maxMembers         = Number(maxMembers) || 100;
+    if (muteNotifications  !== undefined) group.settings.muteNotifications  = !!muteNotifications;
     await group.save();
     res.json({ group });
   } catch (err) {
@@ -365,8 +370,8 @@ export async function shareExam(req, res) {
     const exam = await Exam.findById(examId);
     if (!exam) return res.status(404).json({ message: 'Exam not found' });
 
-    if (!group.sharedExams.map(id => id.toString()).includes(examId)) {
-      group.sharedExams.push(examId);
+    if (!group.sharedExams.some(se => se.exam.toString() === examId)) {
+      group.sharedExams.push({ exam: examId });
       await group.save();
     }
 
@@ -374,6 +379,17 @@ export async function shareExam(req, res) {
       group: group._id, sender: req.user._id,
       type: 'exam_share', examRef: examId, text: `Shared exam: ${exam.title}`,
     });
+
+    // Notify all group members — link directly to the exam
+    if (group.members?.length) {
+      await createNotificationsForUsers(group.members, {
+        type:    'exam_shared',
+        title:   `New Test in ${group.name}`,
+        message: `"${exam.title}" has been shared by your instructor.`,
+        link:    `/exam/${exam._id}`,
+        meta:    { groupId: group._id, examId: exam._id },
+      });
+    }
 
     res.json({ message: 'Exam shared with group' });
   } catch (err) {
@@ -388,7 +404,7 @@ export async function unshareExam(req, res) {
     if (group.instructor.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({ message: 'Not your group' });
     }
-    group.sharedExams = group.sharedExams.filter(id => id.toString() !== req.params.examId);
+    group.sharedExams = group.sharedExams.filter(se => se.exam.toString() !== req.params.examId);
     await group.save();
     res.json({ message: 'Exam removed from group' });
   } catch (err) {
@@ -491,11 +507,10 @@ export async function deleteMessage(req, res) {
   try {
     const msg = await GroupMessage.findById(req.params.msgId);
     if (!msg) return res.status(404).json({ message: 'Message not found' });
-    const group = await Group.findById(req.params.id).lean();
     const uid = req.user._id.toString();
-    const isOwner = group?.instructor?.toString() === uid;
-    if (msg.sender.toString() !== uid && !isOwner && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Cannot delete this message' });
+    // Only the original sender (or admin) can delete — not even group owner
+    if (msg.sender.toString() !== uid && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'You can only delete your own messages' });
     }
     await msg.deleteOne();
     res.json({ message: 'Deleted' });
@@ -523,6 +538,72 @@ export async function editMessage(req, res) {
     msg.edited = true;
     await msg.save();
     res.json({ message: 'Message updated' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+}
+
+// ── Bulk Invite Members (CSV/Email list) ──────────────────────────────────────
+
+export async function bulkInviteMembers(req, res) {
+  try {
+    const group = await Group.findById(req.params.id);
+    if (!group) return res.status(404).json({ message: 'Group not found' });
+    if (group.instructor.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Not your group' });
+    }
+
+    const { emails } = req.body; // array of email strings from client
+    if (!Array.isArray(emails) || emails.length === 0) {
+      return res.status(400).json({ message: 'No emails provided' });
+    }
+
+    const results = { sent: [], skipped: [], failed: [] };
+
+    for (const rawEmail of emails) {
+      const email = rawEmail.trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        results.skipped.push({ email, reason: 'invalid format' });
+        continue;
+      }
+
+      // Check if already a member
+      const existing = await User.findOne({ email });
+      if (existing) {
+        const alreadyMember = group.members.map(id => id.toString()).includes(existing._id.toString());
+        if (alreadyMember) {
+          results.skipped.push({ email, reason: 'already a member' });
+          continue;
+        }
+      }
+
+      // Check for existing pending invite
+      const existingInvite = await GroupInvite.findOne({ group: group._id, email, status: 'pending' });
+      if (existingInvite) {
+        results.skipped.push({ email, reason: 'invite already pending' });
+        continue;
+      }
+
+      try {
+        const invite  = await GroupInvite.create({
+          group:     group._id,
+          email,
+          invitedBy: req.user._id,
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        });
+
+        const inviteUrl = `${CLIENT_URL}/groups/invite/${invite.token}`;
+        await sendGroupInviteEmail({ to: email, groupName: group.name, invitedByName: req.user.name, inviteUrl }).catch(() => {});
+        results.sent.push(email);
+      } catch (err) {
+        results.failed.push({ email, reason: err.message });
+      }
+    }
+
+    res.json({
+      message: `${results.sent.length} invite(s) sent`,
+      results,
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

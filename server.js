@@ -37,6 +37,7 @@ import feedbackRoutes from './routes/feedback.js';
 import contactRoutes from './routes/contact.js';
 import announcementRoutes from './routes/announcements.js';
 import groupRoutes from './routes/groups.js';
+import notificationRoutes from './routes/notifications.js';
 
 const app = express();
 connectDB();
@@ -106,7 +107,8 @@ app.use('/api/instructor', instructorRoutes);
 app.use('/api/feedback', feedbackRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/announcements', announcementRoutes);
-app.use('/api/groups', groupRoutes);
+app.use('/api/groups',        groupRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // Bare-path fallback (handles VITE_API_URL set without /api suffix)
 app.use(apiLimiter);

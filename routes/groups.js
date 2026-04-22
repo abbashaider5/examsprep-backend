@@ -3,6 +3,7 @@ import {
   acceptGroupInvite,
   adminDeleteGroup,
   adminGetAll,
+  bulkInviteMembers,
   cancelInvite,
   createGroup,
   declineGroupInvite,
@@ -54,6 +55,7 @@ router.patch('/:id/settings', updateGroupSettings);
 
 // ── Members ───────────────────────────────────────────────────────────────────
 router.post('/:id/invite',              inviteMember);
+router.post('/:id/bulk-invite',         bulkInviteMembers);
 router.get('/:id/invites',              getGroupInvites);
 router.delete('/:id/invites/:inviteId', cancelInvite);
 router.delete('/:id/members/:userId',   removeMember);

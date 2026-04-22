@@ -42,6 +42,12 @@ export const submitResult = async (req, res, next) => {
     const exam = await Exam.findById(examId);
     if (!exam) return next(new AppError('Exam not found', 404));
 
+    // Check expiry (skip for owner and admin)
+    const isOwner = exam.createdBy.toString() === req.user._id.toString();
+    if (!isOwner && req.user.role !== 'admin' && exam.expiryDate && new Date(exam.expiryDate) < new Date()) {
+      return next(new AppError('This test has expired', 403));
+    }
+
     const autoTerminated = violations >= 3;
     const passThreshold = exam.passingPercentage ?? 75;
     const hasCodingQuestions = exam.questions.some(q => q.type === 'coding');
