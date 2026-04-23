@@ -435,16 +435,15 @@ export const getExamReport = async (req, res, next) => {
       .populate({ path: 'result', select: 'score totalQuestions correctCount incorrectCount percentage passed timeTaken proctored violations topicAccuracy createdAt' })
       .sort({ createdAt: -1 });
 
-    const emailSet = [...new Set(invites.map(inv => inv.email))];
-    const allResults = await Result.find({
-      exam: exam._id,
-      user: { $in: await User.find({ email: { $in: emailSet } }).distinct('_id') },
-    }).sort({ createdAt: 1 });
+    // Fetch ALL results for this exam (covers both invite-based and batch-accessed students)
+    const allResults = await Result.find({ exam: exam._id })
+      .populate('user', 'name email')
+      .sort({ createdAt: 1 });
 
-    const users = await User.find({ email: { $in: emailSet } }).select('email name');
     const resultsByUser = {};
     allResults.forEach(r => {
-      const uid = r.user.toString();
+      if (!r.user) return;
+      const uid = r.user._id.toString();
       if (!resultsByUser[uid]) resultsByUser[uid] = [];
       resultsByUser[uid].push(r);
     });
@@ -458,20 +457,22 @@ export const getExamReport = async (req, res, next) => {
       : [];
     const screenshotMap = Object.fromEntries(screenshotCounts.map(s => [s._id.toString(), s.count]));
 
-    const rows = invites.map(inv => {
-      const userInfo = users.find(u => u.email === inv.email);
-      const uid = userInfo?._id?.toString();
+    // Build invite-email → user lookup
+    const inviteEmailSet = new Set(invites.map(inv => inv.email));
+    const inviteUsers = await User.find({ email: { $in: [...inviteEmailSet] } }).select('email name');
+    const inviteUserByEmail = Object.fromEntries(inviteUsers.map(u => [u.email, u]));
+
+    const buildRow = (email, name, uid, inv) => {
       const userResults = uid ? (resultsByUser[uid] || []) : [];
       const latestResult = userResults[userResults.length - 1] || null;
       const bestResult = userResults.reduce((best, r) => (!best || r.percentage > best.percentage ? r : best), null);
-
       return {
-        _id: inv._id,
-        email: inv.email,
-        name: userInfo?.name || null,
-        inviteStatus: inv.status,
-        invitedAt: inv.createdAt,
-        reattemptCount: inv.reattemptCount || 0,
+        _id: inv?._id || uid,
+        email,
+        name: name || null,
+        inviteStatus: inv?.status || 'batch',
+        invitedAt: inv?.createdAt || null,
+        reattemptCount: inv?.reattemptCount || 0,
         totalAttempts: userResults.length,
         screenshotCount: uid ? (screenshotMap[uid] || 0) : 0,
         latestResult: latestResult ? {
@@ -503,6 +504,27 @@ export const getExamReport = async (req, res, next) => {
           attemptedAt: r.createdAt,
         })),
       };
+    };
+
+    // Rows for invited students
+    const rows = invites.map(inv => {
+      const userInfo = inviteUserByEmail[inv.email];
+      const uid = userInfo?._id?.toString();
+      return buildRow(inv.email, userInfo?.name, uid, inv);
+    });
+
+    // Add batch-only students (have results but no invite)
+    const invitedUserIds = new Set(
+      inviteUsers.map(u => u._id.toString())
+    );
+    const batchOnlyUsers = new Set();
+    allResults.forEach(r => {
+      if (!r.user) return;
+      const uid = r.user._id.toString();
+      if (!invitedUserIds.has(uid) && !batchOnlyUsers.has(uid)) {
+        batchOnlyUsers.add(uid);
+        rows.push(buildRow(r.user.email, r.user.name, uid, null));
+      }
     });
 
     const attempted = rows.filter(r => r.totalAttempts > 0);
@@ -510,6 +532,7 @@ export const getExamReport = async (req, res, next) => {
       totalInvites: invites.length,
       accepted: invites.filter(i => i.status === 'accepted').length,
       pending: invites.filter(i => i.status === 'pending').length,
+      totalParticipants: rows.length,
       attempted: attempted.length,
       passed: rows.filter(r => r.latestResult?.passed).length,
       avgScore: attempted.length
