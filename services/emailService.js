@@ -88,6 +88,21 @@ export const sendOTPEmail = async ({ email, name, otp, purpose = 'login' }) => {
   return send(email, `${otp} — ${BRAND} Verification Code`, html);
 };
 
+// ── 2b. Password Reset OTP ────────────────────────────────────────────────────
+export const sendPasswordResetEmail = async ({ email, name, otp }) => {
+  const html = layout(`
+    <h2 style="margin:0 0 6px;font-size:20px;color:#0f172a;">Reset Your Password</h2>
+    <p style="color:#475569;font-size:13px;margin:0 0 20px;">Hi ${name || 'there'}, you requested a password reset for your <strong>${BRAND}</strong> account. Use the code below — it expires in <strong>10 minutes</strong>.</p>
+    <div style="background:#f8fafc;border:2px dashed #ef4444;border-radius:8px;padding:20px;text-align:center;margin-bottom:16px;">
+      <div style="font-size:36px;font-weight:900;letter-spacing:10px;color:#ef4444;font-family:monospace;">${otp}</div>
+      <div style="color:#94a3b8;font-size:11px;margin-top:6px;">Valid for 10 minutes &middot; Do not share</div>
+    </div>
+    ${notice('<strong>Didn\'t request this?</strong> You can safely ignore this email. Your password will not change unless you complete the reset.')}
+    <p style="color:#94a3b8;font-size:11px;margin:12px 0 0;text-align:center;">For security, this code can only be used once.</p>
+  `, `Password reset code: ${otp}`);
+  return send(email, `${otp} — ${BRAND} Password Reset`, html);
+};
+
 // ── 3. Result ─────────────────────────────────────────────────────────────────
 export const sendResultEmail = async ({ email, name, examName, percentage, passed, certId, pdfBuffer }) => {
   const scoreColor = percentage >= 75 ? '#16a34a' : percentage >= 50 ? '#d97706' : '#dc2626';

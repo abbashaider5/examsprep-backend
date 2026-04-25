@@ -4,7 +4,7 @@ import { AppError } from '../middleware/errorHandler.js';
 import User from '../models/User.js';
 import OTPCode from '../models/OTPCode.js';
 import { getSettings } from '../models/SystemSettings.js';
-import { sendWelcomeEmail, sendOTPEmail, sendSecurityAlertEmail } from '../services/emailService.js';
+import { sendWelcomeEmail, sendOTPEmail, sendSecurityAlertEmail, sendPasswordResetEmail } from '../services/emailService.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
 
@@ -170,6 +170,53 @@ export const logout = async (req, res) => {
 // ── Get Me ────────────────────────────────────────────────────────────────────
 export const getMe = (req, res) => {
   res.json({ user: sanitizeUser(req.user) });
+};
+
+// ── Forgot Password (request OTP) ─────────────────────────────────────────────
+export const forgotPassword = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    // Look up silently — always return same response to prevent email enumeration
+    const user = await User.findOne({ email });
+    if (user && !user.isBlocked) {
+      const otpRecord = await OTPCode.generate(email, 'password_reset');
+      sendPasswordResetEmail({ email, name: user.name, otp: otpRecord.otp }).catch(logger.error);
+      await log({ user, action: 'password_reset_requested', category: 'auth', ...fromReq(req) });
+    }
+    res.json({ message: 'If that email is registered, you will receive a reset code shortly.' });
+  } catch (err) { next(err); }
+};
+
+// ── Reset Password (verify OTP + set new password) ────────────────────────────
+export const resetPassword = async (req, res, next) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    const result = await OTPCode.verify(email, otp, 'password_reset');
+    if (!result.valid) {
+      return next(new AppError(result.reason, 400));
+    }
+
+    const user = await User.findOne({ email }).select('+password');
+    if (!user) return next(new AppError('User not found.', 404));
+
+    user.password = newPassword;
+    user.failedLoginAttempts = 0;
+    user.accountLockedUntil = undefined;
+    await user.save();
+
+    // Invalidate all existing sessions
+    await User.findByIdAndUpdate(user._id, { refreshToken: null });
+
+    sendSecurityAlertEmail({
+      email, name: user.name,
+      event: 'Password Reset',
+      details: 'Your password was successfully reset via the forgot password flow.',
+    }).catch(logger.error);
+    await log({ user, action: 'password_reset', category: 'auth', ...fromReq(req) });
+
+    res.json({ message: 'Password updated successfully. Please sign in with your new password.' });
+  } catch (err) { next(err); }
 };
 
 // ── Send OTP (standalone) ─────────────────────────────────────────────────────
