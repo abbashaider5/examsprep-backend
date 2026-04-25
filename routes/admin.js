@@ -5,7 +5,10 @@ import {
   updateUserPlan, updateUserRole,
 } from '../controllers/adminController.js';
 import {
-  getContacts, updateContactStatus, replyToContact, deleteContact,
+  deleteContact,
+  getContacts,
+  replyToContact,
+  updateContactStatus,
 } from '../controllers/contactController.js';
 import { protect, requireAdmin } from '../middleware/auth.js';
 
@@ -22,7 +25,7 @@ router.get('/exams/public', getPublicExams);
 router.get('/transactions', getAdminTransactions);
 router.get('/subscriptions', getAdminSubscriptions);
 
-// Contact query management
+// Contact query management --
 router.get('/contacts', getContacts);
 router.patch('/contacts/:id/status', updateContactStatus);
 router.post('/contacts/:id/reply', replyToContact);
