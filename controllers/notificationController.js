@@ -1,4 +1,5 @@
 import Notification from '../models/Notification.js';
+import { AppError } from '../middleware/errorHandler.js';
 
 // ── Get my notifications ──────────────────────────────────────────────────────
 export async function getMyNotifications(req, res) {
@@ -8,6 +9,27 @@ export async function getMyNotifications(req, res) {
       .limit(50)
       .lean();
     res.json({ notifications });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+}
+
+// ── Get a single notification by ID ──────────────────────────────────────────
+export async function getNotificationById(req, res, next) {
+  try {
+    const notification = await Notification.findOne({
+      _id: req.params.id,
+      user: req.user._id,
+    }).lean();
+    if (!notification) return next(new AppError('Notification not found', 404));
+
+    // Auto-mark as read when viewed
+    if (!notification.isRead) {
+      await Notification.updateOne({ _id: notification._id }, { isRead: true });
+      notification.isRead = true;
+    }
+
+    res.json({ notification });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

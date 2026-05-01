@@ -5,6 +5,7 @@ import express from 'express';
 import mongoSanitize from 'express-mongo-sanitize';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import mongoose from 'mongoose';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -38,9 +39,15 @@ import contactRoutes from './routes/contact.js';
 import announcementRoutes from './routes/announcements.js';
 import groupRoutes from './routes/groups.js';
 import notificationRoutes from './routes/notifications.js';
+import resourceRoutes from './routes/resources.js';
+import ticketRoutes from './routes/tickets.js';
 
 const app = express();
 connectDB();
+
+// If DB is down, fail fast (don't let Mongoose buffer requests indefinitely in dev)
+mongoose.set('bufferCommands', false);
+mongoose.set('bufferTimeoutMS', 1000);
 
 // ── CORS — supports both production and local dev ────────────────────────────
 const allowedOrigins = [
@@ -76,6 +83,22 @@ if (process.env.NODE_ENV !== 'test') {
   app.use(morgan('dev', { stream: { write: (msg) => logger.http(msg.trim()) } }));
 }
 
+// If Mongo isn't connected, return a helpful error for DB-backed endpoints.
+// (Without this, requests may hang or appear as proxy/network errors.)
+app.use((req, res, next) => {
+  const mongoReady = mongoose.connection.readyState === 1; // 1 = connected
+  if (mongoReady) return next();
+
+  // Health endpoint should still work.
+  if (req.path === '/api/health' || req.path === '/health') return next();
+
+  // Most endpoints depend on DB (including auth); be explicit and fast.
+  return res.status(503).json({
+    message:
+      'Database unavailable. Start a local MongoDB or whitelist your IP in MongoDB Atlas, then restart the server.',
+  });
+});
+
 // Maintenance mode check (excluding admin/auth/health)
 app.use(async (req, res, next) => {
   const p = req.path;
@@ -109,6 +132,8 @@ app.use('/api/contact', contactRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/groups',        groupRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/resources',    resourceRoutes);
+app.use('/api/tickets', ticketRoutes);
 
 // Bare-path fallback (handles VITE_API_URL set without /api suffix)
 app.use(apiLimiter);
@@ -127,6 +152,7 @@ app.use('/feedback', feedbackRoutes);
 app.use('/contact', contactRoutes);
 app.use('/announcements', announcementRoutes);
 app.use('/groups', groupRoutes);
+app.use('/tickets', ticketRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
 app.get('/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
@@ -147,7 +173,7 @@ app.get('*', (req, res, next) => {
     || req.path.startsWith('/logs') || req.path.startsWith('/payments')
     || req.path.startsWith('/instructor') || req.path.startsWith('/feedback')
     || req.path.startsWith('/contact') || req.path.startsWith('/announcements')
-    || req.path.startsWith('/groups')
+    || req.path.startsWith('/groups') || req.path.startsWith('/tickets')
     || req.path === '/health') {
     return next();
   }

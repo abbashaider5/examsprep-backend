@@ -8,9 +8,11 @@ import User from '../models/User.js';
 import { getSettings } from '../models/SystemSettings.js';
 import { sendResultEmail, sendProctoringViolationEmail } from '../services/emailService.js';
 import { generateCertificatePDF } from '../services/pdfService.js';
-import { evaluateCodingAnswer } from '../services/aiService.js';
+import { evaluateCodingAnswer, evaluateDescriptiveAnswer } from '../services/aiService.js';
+import { createNotificationsForUsers } from './notificationController.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
+import { delCache, getCache, setCache } from '../services/cacheService.js';
 
 const calcXP = (percentage, difficulty) => {
   const base = { easy: 10, medium: 20, hard: 35 };
@@ -34,7 +36,7 @@ const detectWeakTopics = (answers, questions) => {
 
 export const submitResult = async (req, res, next) => {
   try {
-    const { examId, answers, timeTaken, violations } = req.body;
+    const { examId, answers, timeTaken, violations, proctoringEvents = [] } = req.body;
     if (!examId) return next(new AppError('examId is required', 400));
     if (!Array.isArray(answers) || answers.length === 0) return next(new AppError('answers array is required', 400));
 
@@ -49,14 +51,29 @@ export const submitResult = async (req, res, next) => {
     }
 
     const autoTerminated = violations >= 3;
+    const sanitizedEvents = Array.isArray(proctoringEvents)
+      ? proctoringEvents
+          .filter(e => e && typeof e.message === 'string')
+          .slice(-500)
+          .map(e => ({
+            type: String(e.type || 'violation').slice(0, 64),
+            severity: ['info', 'warning', 'critical'].includes(e.severity) ? e.severity : 'warning',
+            message: String(e.message).slice(0, 500),
+            source: String(e.source || 'client').slice(0, 64),
+            timestamp: e.timestamp ? new Date(e.timestamp) : new Date(),
+          }))
+      : [];
+
     const passThreshold = exam.passingPercentage ?? 75;
     const hasCodingQuestions = exam.questions.some(q => q.type === 'coding');
+    const hasDescriptiveQuestions = exam.questions.some(q => q.type === 'descriptive');
 
-    // Score MCQ answers immediately; collect coding answers for AI eval
+    // Score MCQ answers immediately; collect coding/descriptive answers for AI eval
     let correctCount = 0;
     let unattemptedCount = 0;
     const topicMap = {};
     const pendingCodingEvals = [];
+    const pendingDescriptiveEvals = [];
 
     const scoredAnswers = answers.map(a => {
       const q = exam.questions[a.questionIndex];
@@ -67,8 +84,12 @@ export const submitResult = async (req, res, next) => {
       topicMap[t].total++;
 
       if (q.type === 'coding') {
-        // AI evaluation deferred — store index for later
         pendingCodingEvals.push({ index: a.questionIndex, code: a.code || '', q });
+        return { ...a, isCorrect: false, aiScore: null, aiFeedback: '' };
+      }
+
+      if (q.type === 'descriptive') {
+        pendingDescriptiveEvals.push({ index: a.questionIndex, text: a.textAnswer || '', q });
         return { ...a, isCorrect: false, aiScore: null, aiFeedback: '' };
       }
 
@@ -96,6 +117,38 @@ export const submitResult = async (req, res, next) => {
 
       evalResults.forEach((evalResult, i) => {
         const { index } = pendingCodingEvals[i];
+        const scored = scoredAnswers.find(a => a.questionIndex === index);
+        const q = exam.questions[index];
+        const t = q.topic || 'General';
+
+        if (scored) {
+          scored.isCorrect = evalResult.isCorrect;
+          scored.aiScore   = evalResult.score;
+          scored.aiFeedback = evalResult.feedback;
+        }
+        if (evalResult.isCorrect) {
+          correctCount++;
+          if (topicMap[t]) topicMap[t].correct++;
+        }
+      });
+    }
+
+    // Evaluate descriptive answers in parallel
+    if (pendingDescriptiveEvals.length > 0) {
+      const evalResults = await Promise.all(
+        pendingDescriptiveEvals.map(({ text, q }) =>
+          evaluateDescriptiveAnswer({
+            question: q.question,
+            answer: text,
+            modelAnswer: q.modelAnswer || '',
+            keyPoints: q.keyPoints || [],
+            difficulty: exam.difficulty,
+          })
+        )
+      );
+
+      evalResults.forEach((evalResult, i) => {
+        const { index } = pendingDescriptiveEvals[i];
         const scored = scoredAnswers.find(a => a.questionIndex === index);
         const q = exam.questions[index];
         const t = q.topic || 'General';
@@ -177,8 +230,10 @@ export const submitResult = async (req, res, next) => {
       score: correctCount, totalQuestions: total, correctCount,
       incorrectCount, unattemptedCount, percentage, timeTaken,
       passed, proctored: exam.proctored, violations: violations || 0,
+      proctoringEvents: sanitizedEvents,
+      terminatedByProctoring: autoTerminated && !!exam.proctored,
       topicAccuracy, xpEarned, certificateId: certificate?._id,
-      hasCodingQuestions,
+      hasCodingQuestions: hasCodingQuestions || hasDescriptiveQuestions,
     });
 
     if (certificate) { certificate.result = result._id; await certificate.save(); }
@@ -210,6 +265,13 @@ export const submitResult = async (req, res, next) => {
 
     await Exam.findByIdAndUpdate(exam._id, { $inc: { timesAttempted: 1 } });
 
+    // Invalidate result + analytics caches
+    await delCache(
+      `results:${req.user._id}`,
+      `analytics:${exam.createdBy}`,
+      `analytics_detailed:${exam.createdBy}`,
+    );
+
     await log({
       user: req.user, action: 'exam_submitted', category: 'exam',
       metadata: { examId, percentage, passed, violations, autoTerminated, passThreshold },
@@ -218,11 +280,40 @@ export const submitResult = async (req, res, next) => {
     });
 
     if (autoTerminated && exam.proctored && settings.emailProctoringViolationEnabled) {
+      // Notify student
       sendProctoringViolationEmail({
         email: user.email, name: user.name,
         examName: exam.title, violations,
-        reason: 'Tab switching detected repeatedly',
+        reason: 'Repeated proctoring violations detected',
       }).catch(logger.error);
+
+      // Notify instructor by email and in-app notification
+      const instructor = await User.findById(exam.createdBy).select('name email');
+      if (instructor) {
+        sendProctoringViolationEmail({
+          email: instructor.email, name: instructor.name,
+          examName: exam.title, violations,
+          reason: `Student ${user.name} (${user.email}) was auto-terminated for repeated violations`,
+        }).catch(logger.error);
+
+        createNotificationsForUsers([instructor._id], {
+          type: 'proctoring_violation',
+          title: `Proctoring Violation — ${exam.title}`,
+          message: `${user.name} was auto-terminated after ${violations} violation(s) during "${exam.title}".`,
+          link: `/instructor/report/${exam._id}`,
+          meta: { examId: exam._id, studentId: user._id, violations },
+        }).catch(logger.error);
+      }
+
+      // Student in-app notification
+      createNotificationsForUsers([user._id], {
+        type: 'proctoring_violation',
+        title: 'Exam Terminated — Proctoring Violations',
+        message: `Your attempt on "${exam.title}" was terminated after ${violations} violation(s). Your result has been recorded.`,
+        link: `/results/${result._id}`,
+        meta: { examId: exam._id, violations },
+      }).catch(logger.error);
+
       await log({ user: req.user, action: 'proctoring_terminated', category: 'proctoring', metadata: { examId, violations }, ...fromReq(req), severity: 'critical' });
     }
 
@@ -238,11 +329,11 @@ export const submitResult = async (req, res, next) => {
         id: result._id, score: correctCount, total, percentage, passed,
         correctCount, incorrectCount, unattemptedCount, timeTaken,
         topicAccuracy, xpEarned, violations, passThreshold,
+        terminatedByProctoring: autoTerminated && !!exam.proctored,
+        proctoringEvents: sanitizedEvents,
         certificate: certificate ? { certId: certificate.certId, id: certificate._id } : null,
-        // visibility controls
         showResultToUser:  exam.showResultToUser  !== false,
         showAnswersToUser: exam.showAnswersToUser  !== false,
-        // only include detailed answers/questions based on exam settings
         ...(exam.showAnswersToUser !== false && {
           answers: scoredAnswers,
           questions: exam.questions,
@@ -254,10 +345,16 @@ export const submitResult = async (req, res, next) => {
 
 export const getMyResults = async (req, res, next) => {
   try {
+    const key = `results:${req.user._id}`;
+    const cached = await getCache(key);
+    if (cached) return res.json(cached);
+
     const results = await Result.find({ user: req.user._id })
       .populate('exam', 'title subject difficulty')
       .sort({ createdAt: -1 }).limit(50);
-    res.json({ results });
+    const payload = { results };
+    await setCache(key, payload, 300);
+    res.json(payload);
   } catch (err) { next(err); }
 };
 

@@ -8,6 +8,7 @@ dotenv.config({ path: join(__dirname, '../.env') });
 
 import Exam from '../models/Exam.js';
 import User from '../models/User.js';
+import { connectDB } from '../config/db.js';
 
 const ADMIN = { name: 'Admin User', email: 'admin@examprep.com', password: 'Admin@123', role: 'admin' };
 const USER = { name: 'John Doe', email: 'user@examprep.com', password: 'User@123', role: 'user' };
@@ -108,7 +109,10 @@ const SAMPLE_EXAMS = [
 
 async function seed() {
   try {
-    await mongoose.connect(process.env.MONGODB_URI);
+    const conn = await connectDB();
+    if (!conn && mongoose.connection.readyState !== 1) {
+      throw new Error('Database connection failed (primary and fallback).');
+    }
     console.log('Connected to MongoDB');
 
     await User.deleteOne({ email: ADMIN.email });

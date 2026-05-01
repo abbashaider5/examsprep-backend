@@ -282,11 +282,13 @@ async function send(to, subject, html, attachments = []) {
   try {
     if (!process.env.RESEND_API_KEY) {
       logger.warn(`[Email] RESEND_API_KEY not set — skipping to ${to}: ${subject}`);
-      return;
+      return false;
     }
     await getResend().emails.send({ from: FROM, to, subject, html, ...(attachments.length ? { attachments } : {}) });
     logger.info(`[Email] Sent "${subject}" → ${to}`);
+    return true;
   } catch (err) {
     logger.error(`[Email] Failed to send to ${to}: ${err.message}`);
+    return false;
   }
 }

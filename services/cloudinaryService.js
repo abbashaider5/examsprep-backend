@@ -45,7 +45,43 @@ export const uploadScreenshot = async (base64DataUri, folder = 'examprep/screens
 };
 
 /**
- * Upload any base64 data URI (image or raw file) to Cloudinary.
+ * Upload a raw file buffer (PDF/DOC/DOCX) to Cloudinary.
+ * Returns { url, publicId } or null on failure.
+ */
+export const uploadResourceFile = async (buffer, originalName = 'resource', folder = 'examprep/resources') => {
+  if (!isCloudinaryConfigured()) return null;
+  try {
+    const base64 = buffer.toString('base64');
+    const ext = originalName.split('.').pop()?.toLowerCase() || 'pdf';
+    const mimeMap = { pdf: 'application/pdf', doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
+    const mime = mimeMap[ext] || 'application/octet-stream';
+    const dataUri = `data:${mime};base64,${base64}`;
+    const safePublicId = `${Date.now()}_${originalName.replace(/[^a-z0-9._-]/gi, '_')}`;
+    const result = await cloudinary.uploader.upload(dataUri, {
+      folder,
+      resource_type: 'raw',
+      public_id: safePublicId,
+    });
+    return { url: result.secure_url, publicId: result.public_id };
+  } catch (err) {
+    logger.error(`[Cloudinary] Resource upload failed: ${err.message}`);
+    return null;
+  }
+};
+
+/**
+ * Delete a raw file from Cloudinary by publicId.
+ */
+export const deleteCloudinaryResource = async (publicId) => {
+  if (!isCloudinaryConfigured() || !publicId) return;
+  try {
+    await cloudinary.uploader.destroy(publicId, { resource_type: 'raw' });
+  } catch (err) {
+    logger.error(`[Cloudinary] Delete failed for ${publicId}: ${err.message}`);
+  }
+};
+
+/**
  * Used for group chat media.
  * Returns { url, publicId, resourceType } or null.
  */
@@ -64,6 +100,35 @@ export const uploadGroupMedia = async (base64DataUri, originalName = 'file') => 
     return { url: result.secure_url, publicId: result.public_id, resourceType };
   } catch (err) {
     logger.error(`[Cloudinary] Group media upload failed: ${err.message}`);
+    return null;
+  }
+};
+
+/**
+ * Upload support ticket attachment from file buffer.
+ * Returns { url, publicId, resourceType, originalName } or null.
+ */
+export const uploadTicketAttachment = async (buffer, mimetype, originalName = 'attachment') => {
+  if (!isCloudinaryConfigured() || !buffer) return null;
+  try {
+    const base64 = buffer.toString('base64');
+    const dataUri = `data:${mimetype || 'application/octet-stream'};base64,${base64}`;
+    const isImage = /^image\//i.test(mimetype || '');
+    const resourceType = isImage ? 'image' : 'raw';
+    const result = await cloudinary.uploader.upload(dataUri, {
+      folder: 'examprep/tickets',
+      resource_type: resourceType,
+      public_id: `${Date.now()}_${originalName.replace(/[^a-z0-9._-]/gi, '_')}`,
+      ...(isImage ? { quality: 85, width: 1600, crop: 'limit' } : {}),
+    });
+    return {
+      url: result.secure_url,
+      publicId: result.public_id,
+      resourceType,
+      originalName,
+    };
+  } catch (err) {
+    logger.error(`[Cloudinary] Ticket attachment upload failed: ${err.message}`);
     return null;
   }
 };

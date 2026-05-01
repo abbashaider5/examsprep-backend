@@ -1,7 +1,84 @@
 import { AppError } from '../middleware/errorHandler.js';
 import Result from '../models/Result.js';
+import Resource from '../models/Resource.js';
 import User from '../models/User.js';
 import { generateRecommendation } from '../services/aiService.js';
+
+const RESOURCE_LIBRARY = [
+  {
+    keywords: ['react', 'hooks', 'context', 'redux', 'component', 'state'],
+    items: [
+      { type: 'article', title: 'React official docs', url: 'https://react.dev/learn' },
+      { type: 'video', title: 'Net Ninja React playlist', url: 'https://www.youtube.com/results?search_query=net+ninja+react+tutorial' },
+      { type: 'practice', title: 'React practice questions', url: 'https://www.youtube.com/results?search_query=react+interview+questions+practice' },
+    ],
+  },
+  {
+    keywords: ['javascript', 'js', 'array', 'promise', 'async', 'closure'],
+    items: [
+      { type: 'article', title: 'MDN JavaScript Guide', url: 'https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide' },
+      { type: 'video', title: 'JavaScript concepts videos', url: 'https://www.youtube.com/results?search_query=javascript+concepts+tutorial' },
+      { type: 'practice', title: 'JavaScript exercises', url: 'https://javascript.info/' },
+    ],
+  },
+  {
+    keywords: ['python', 'loop', 'function', 'oop', 'list', 'dictionary'],
+    items: [
+      { type: 'article', title: 'Python official tutorial', url: 'https://docs.python.org/3/tutorial/' },
+      { type: 'video', title: 'Python topic tutorials', url: 'https://www.youtube.com/results?search_query=python+programming+tutorial' },
+      { type: 'practice', title: 'Python practice exercises', url: 'https://www.hackerrank.com/domains/python' },
+    ],
+  },
+  {
+    keywords: ['sql', 'database', 'join', 'query', 'normalization'],
+    items: [
+      { type: 'article', title: 'SQLBolt lessons', url: 'https://sqlbolt.com/' },
+      { type: 'video', title: 'SQL tutorials', url: 'https://www.youtube.com/results?search_query=sql+joins+tutorial' },
+      { type: 'practice', title: 'SQL practice set', url: 'https://leetcode.com/problemset/database/' },
+    ],
+  },
+  {
+    keywords: ['dsa', 'algorithm', 'data structure', 'tree', 'graph', 'dp'],
+    items: [
+      { type: 'article', title: 'GeeksforGeeks DSA overview', url: 'https://www.geeksforgeeks.org/data-structures/' },
+      { type: 'video', title: 'DSA problem solving videos', url: 'https://www.youtube.com/results?search_query=data+structures+and+algorithms+tutorial' },
+      { type: 'practice', title: 'LeetCode practice', url: 'https://leetcode.com/problemset/' },
+    ],
+  },
+];
+
+const normalizeTopic = (value = '') => value.trim().toLowerCase();
+
+const buildWeakTopicResources = async (topics = []) => {
+  const normalizedTopics = [...new Set(topics.map(normalizeTopic).filter(Boolean))].slice(0, 5);
+  if (!normalizedTopics.length) return [];
+
+  const adminResources = await Resource.find({ scope: 'admin' })
+    .select('title originalName cloudinaryUrl')
+    .sort({ createdAt: -1 })
+    .limit(50)
+    .lean();
+
+  return normalizedTopics.map((topic) => {
+    const preset = RESOURCE_LIBRARY.find(entry => entry.keywords.some(keyword => topic.includes(keyword)));
+    const curated = preset?.items || [
+      { type: 'article', title: `Read about ${topic}`, url: `https://www.google.com/search?q=${encodeURIComponent(`${topic} tutorial`)}` },
+      { type: 'video', title: `Watch a ${topic} lesson`, url: `https://www.youtube.com/results?search_query=${encodeURIComponent(`${topic} tutorial`)}` },
+      { type: 'practice', title: `Practice ${topic}`, url: `https://www.google.com/search?q=${encodeURIComponent(`${topic} practice questions`)}` },
+    ];
+
+    const internal = adminResources
+      .filter(resource => `${resource.title} ${resource.originalName}`.toLowerCase().includes(topic))
+      .slice(0, 2)
+      .map(resource => ({
+        type: 'resource',
+        title: resource.title,
+        url: resource.cloudinaryUrl,
+      }));
+
+    return { topic, items: [...internal, ...curated].slice(0, 4) };
+  });
+};
 
 export const getProfile = async (req, res, next) => {
   try {
@@ -18,7 +95,7 @@ export const getProfile = async (req, res, next) => {
 
 export const updateProfile = async (req, res, next) => {
   try {
-    const allowed = ['name', 'avatar', 'isPublic'];
+    const allowed = ['name', 'avatar', 'isPublic', 'twoFactorEnabled'];
     const updates = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
     const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true, runValidators: true }).select('-password');
     res.json({ user });
@@ -68,7 +145,9 @@ export const getRecommendation = async (req, res, next) => {
 
     let rec = null;
     try { rec = await generateRecommendation({ weakTopics: user.weakTopics, recentScores, subject }); } catch (_) { /* AI unavailable */ }
-    res.json({ recommendation: rec });
+    const weakTopics = [...new Set([...(user.weakTopics || []), rec?.topic].filter(Boolean))].slice(0, 5);
+    const resources = await buildWeakTopicResources(weakTopics);
+    res.json({ recommendation: rec, weakTopics, resources });
   } catch (err) {
     next(err);
   }

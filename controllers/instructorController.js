@@ -7,6 +7,7 @@ import Screenshot from '../models/Screenshot.js';
 import User from '../models/User.js';
 import { getSettings } from '../models/SystemSettings.js';
 import { sendInstructorInviteEmail } from '../services/emailService.js';
+import { delCache, getCache, setCache } from '../services/cacheService.js';
 import { fromReq, log } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
 
@@ -32,6 +33,10 @@ export const becomeInstructor = async (req, res, next) => {
 // GET /api/instructor/exams
 export const getMyExams = async (req, res, next) => {
   try {
+    const key = `instructor_exams:${req.user._id}`;
+    const cached = await getCache(key);
+    if (cached) return res.json(cached);
+
     const exams = await Exam.find({ createdBy: req.user._id }).sort({ createdAt: -1 });
     const examIds = exams.map(e => e._id);
 
@@ -47,7 +52,9 @@ export const getMyExams = async (req, res, next) => {
       acceptedCount: inviteMap[e._id.toString()]?.accepted || 0,
     }));
 
-    res.json({ exams: examsWithStats });
+    const payload = { exams: examsWithStats };
+    await setCache(key, payload, 300);
+    res.json(payload);
   } catch (err) { next(err); }
 };
 
@@ -115,6 +122,10 @@ export const getExamScreenshots = async (req, res, next) => {
 // GET /api/instructor/analytics
 export const getInstructorAnalytics = async (req, res, next) => {
   try {
+    const key = `analytics:${req.user._id}`;
+    const cached = await getCache(key);
+    if (cached) return res.json(cached);
+
     const exams = await Exam.find({ createdBy: req.user._id }).sort({ createdAt: -1 });
     const examIds = exams.map(e => e._id);
 
@@ -148,13 +159,19 @@ export const getInstructorAnalytics = async (req, res, next) => {
       stats: resultMap[e._id.toString()] || { count: 0, avgScore: 0, passCount: 0 },
     }));
 
-    res.json({ totalExams: exams.length, totalInvites, acceptedInvites, totalAttempts, avgScore, exams: examsWithStats });
+    const payload = { totalExams: exams.length, totalInvites, acceptedInvites, totalAttempts, avgScore, exams: examsWithStats };
+    await setCache(key, payload, 600);
+    res.json(payload);
   } catch (err) { next(err); }
 };
 
 // GET /api/instructor/analytics/detailed
 export const getDetailedAnalytics = async (req, res, next) => {
   try {
+    const key = `analytics_detailed:${req.user._id}`;
+    const cached = await getCache(key);
+    if (cached) return res.json(cached);
+
     const exams = await Exam.find({ createdBy: req.user._id }).sort({ createdAt: -1 }).lean();
     const examIds = exams.map(e => e._id);
 
@@ -276,7 +293,7 @@ export const getDetailedAnalytics = async (req, res, next) => {
       };
     });
 
-    res.json({
+    const payload = {
       summary: {
         totalExams:    exams.length,
         totalAttempts,
@@ -289,9 +306,12 @@ export const getDetailedAnalytics = async (req, res, next) => {
       subjectBreakdown,
       studentPerformance,
       groupPerformance,
-    });
+    };
+    await setCache(key, payload, 600);
+    res.json(payload);
   } catch (err) { next(err); }
 };
+
 export const sendGroupInvite = async (req, res, next) => {
   try {
     const { groupId } = req.body;
@@ -432,7 +452,7 @@ export const getExamReport = async (req, res, next) => {
     }
 
     const invites = await ExamInvite.find({ exam: exam._id })
-      .populate({ path: 'result', select: 'score totalQuestions correctCount incorrectCount percentage passed timeTaken proctored violations topicAccuracy createdAt' })
+      .populate({ path: 'result', select: 'score totalQuestions correctCount incorrectCount percentage passed timeTaken proctored violations topicAccuracy createdAt proctoringEvents' })
       .sort({ createdAt: -1 });
 
     // Fetch ALL results for this exam (covers both invite-based and batch-accessed students)
@@ -468,6 +488,7 @@ export const getExamReport = async (req, res, next) => {
       const bestResult = userResults.reduce((best, r) => (!best || r.percentage > best.percentage ? r : best), null);
       return {
         _id: inv?._id || uid,
+        userId: uid || null,
         email,
         name: name || null,
         inviteStatus: inv?.status || 'batch',
@@ -488,6 +509,7 @@ export const getExamReport = async (req, res, next) => {
           violations: latestResult.violations,
           attemptedAt: latestResult.createdAt,
           topicAccuracy: latestResult.topicAccuracy ? Object.fromEntries(latestResult.topicAccuracy) : {},
+          proctoringEvents: Array.isArray(latestResult.proctoringEvents) ? latestResult.proctoringEvents : [],
         } : null,
         bestResult: bestResult ? {
           percentage: bestResult.percentage,
@@ -500,6 +522,7 @@ export const getExamReport = async (req, res, next) => {
           passed: r.passed,
           timeTaken: r.timeTaken,
           violations: r.violations,
+          proctoringEvents: Array.isArray(r.proctoringEvents) ? r.proctoringEvents : [],
           proctored: r.proctored,
           attemptedAt: r.createdAt,
         })),
@@ -541,5 +564,91 @@ export const getExamReport = async (req, res, next) => {
     };
 
     res.json({ exam, rows, summary });
+  } catch (err) { next(err); }
+};
+
+// GET /api/instructor/exams/:examId/students/:userId/report
+export const getStudentExamReport = async (req, res, next) => {
+  try {
+    const { examId, userId } = req.params;
+    const exam = await Exam.findById(examId).select('title subject difficulty proctored questions createdBy passingPercentage screenshotEnabled timePerQuestion');
+    if (!exam) return next(new AppError('Exam not found', 404));
+    if (exam.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return next(new AppError('Not authorized', 403));
+    }
+
+    const student = await User.findById(userId).select('name email plan role');
+    if (!student) return next(new AppError('Student not found', 404));
+
+    const results = await Result.find({ exam: exam._id, user: student._id }).sort({ createdAt: -1 }).lean();
+    const latest = results[0] || null;
+
+    const screenshots = exam.screenshotEnabled
+      ? await Screenshot.find({ exam: exam._id, user: student._id })
+          .populate('result', 'percentage passed violations createdAt')
+          .sort({ capturedAt: -1 })
+          .limit(200)
+          .lean()
+      : [];
+
+    const topicAccuracy = latest?.topicAccuracy ? Object.fromEntries(Object.entries(latest.topicAccuracy)) : {};
+    const weakTopics = Object.entries(topicAccuracy)
+      .filter(([, v]) => typeof v === 'number' && v < 60)
+      .sort((a, b) => a[1] - b[1])
+      .slice(0, 5)
+      .map(([k]) => k);
+
+    const answers = latest?.answers || [];
+    const questionCount = exam.questions?.length || 0;
+    const avgAITotal = answers.filter(a => typeof a.aiScore === 'number');
+    const avgAIScore = avgAITotal.length
+      ? Math.round(avgAITotal.reduce((s, a) => s + (a.aiScore || 0), 0) / avgAITotal.length)
+      : null;
+
+    const recommendation = {
+      summary: latest
+        ? (weakTopics.length
+          ? `Focus on: ${weakTopics.join(', ')}. Review explanations and retake after targeted practice.`
+          : 'Solid performance. Increase difficulty or reduce time-per-question to challenge further.')
+        : 'No attempts yet. Once the student attempts, you will see topic-wise insights and recommendations.',
+      weakTopics,
+      tips: [
+        ...(weakTopics.length ? ['Revise weak topics and retry under timed conditions.', 'Practice 10–20 targeted questions per weak topic.'] : ['Try a harder exam or add more topics to broaden coverage.']),
+        ...(latest?.proctored && latest?.violations > 0 ? ['Violations detected — consider reviewing screenshots for integrity concerns.'] : []),
+        ...(avgAIScore !== null ? [`AI-evaluated questions average: ${avgAIScore}/100.`] : []),
+      ],
+    };
+
+    res.json({
+      exam,
+      student,
+      attempts: results.map(r => ({
+        _id: r._id,
+        percentage: r.percentage,
+        passed: r.passed,
+        score: r.score,
+        correctCount: r.correctCount,
+        incorrectCount: r.incorrectCount,
+        unattemptedCount: r.unattemptedCount,
+        timeTaken: r.timeTaken,
+        proctored: r.proctored,
+        violations: r.violations,
+        proctoringEvents: Array.isArray(r.proctoringEvents) ? r.proctoringEvents : [],
+        topicAccuracy: r.topicAccuracy ? Object.fromEntries(r.topicAccuracy) : {},
+        createdAt: r.createdAt,
+      })),
+      latestResult: latest ? {
+        ...latest,
+        topicAccuracy: latest.topicAccuracy ? Object.fromEntries(latest.topicAccuracy) : {},
+        totalQuestions: latest.totalQuestions || questionCount,
+        proctoringEvents: Array.isArray(latest.proctoringEvents) ? latest.proctoringEvents : [],
+      } : null,
+      screenshots,
+      insights: {
+        weakTopics,
+        avgAIScore,
+      },
+      recommendation,
+    });
   } catch (err) { next(err); }
 };

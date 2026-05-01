@@ -1,22 +1,25 @@
 import mongoose from 'mongoose';
 
 const questionSchema = new mongoose.Schema({
-  type: { type: String, enum: ['mcq', 'coding'], default: 'mcq' },
+  type: { type: String, enum: ['mcq', 'coding', 'descriptive'], default: 'mcq' },
   question: { type: String, required: true },
   // MCQ fields
   options: {
     type: [String],
     default: [],
     validate: {
-      validator: function (v) { return this.type === 'coding' || v.length === 4; },
+      validator: function (v) { return this.type !== 'mcq' || v.length === 4; },
       message: 'MCQ questions must have exactly 4 options',
     },
   },
-  correctAnswer: { type: Number, min: 0, max: 3 }, // not required for coding
+  correctAnswer: { type: Number, min: 0, max: 3 }, // not required for coding/descriptive
   // Coding fields
   language:       { type: String, default: 'javascript' },
   starterCode:    { type: String, default: '' },
   sampleSolution: { type: String, default: '' },
+  // Descriptive fields
+  modelAnswer:    { type: String, default: '' }, // instructor reference answer
+  keyPoints:      [String],                      // key concepts that should appear
   // Common
   explanation: { type: String, default: '' },
   topic:       { type: String, default: '' },
@@ -25,12 +28,13 @@ const questionSchema = new mongoose.Schema({
 const examSchema = new mongoose.Schema({
   title:      { type: String, required: true, trim: true },
   subject:    { type: String, required: true, trim: true },
-  difficulty: { type: String, enum: ['easy', 'medium', 'hard'], required: true },
+  difficulty: { type: String, enum: ['easy', 'medium', 'hard'], default: 'medium' },
+  examType:   { type: String, enum: ['mcq', 'descriptive', 'mixed', 'coding'], default: 'mcq' },
   topics:     [String],
   questions:  [questionSchema],
   createdBy:  { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   proctored:  { type: Boolean, default: false },
-  timePerQuestion: { type: Number },
+  timePerQuestion: { type: Number, default: 60 }, // user-set, seconds per question
   isPublic:   { type: Boolean, default: false },
   timesAttempted: { type: Number, default: 0 },
 
@@ -50,9 +54,12 @@ const examSchema = new mongoose.Schema({
   expiryDate:          { type: Date, default: null },
 }, { timestamps: true });
 
+// Pre-save: only set timePerQuestion from difficulty if not explicitly provided
 examSchema.pre('save', function (next) {
-  const map = { easy: 45, medium: 75, hard: 120 };
-  this.timePerQuestion = map[this.difficulty];
+  if (!this.timePerQuestion || this.isNew) {
+    const map = { easy: 45, medium: 60, hard: 90 };
+    if (!this.timePerQuestion) this.timePerQuestion = map[this.difficulty] || 60;
+  }
   next();
 });
 

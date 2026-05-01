@@ -1,4 +1,6 @@
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
+import { OAuth2Client } from 'google-auth-library';
 import { setAuthCookies, clearAuthCookies, signAccessToken, isProd } from '../middleware/auth.js';
 import { AppError } from '../middleware/errorHandler.js';
 import User from '../models/User.js';
@@ -7,6 +9,26 @@ import { getSettings } from '../models/SystemSettings.js';
 import { sendWelcomeEmail, sendOTPEmail, sendSecurityAlertEmail, sendPasswordResetEmail } from '../services/emailService.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
+
+const googleClient = process.env.GOOGLE_CLIENT_ID
+  ? new OAuth2Client(process.env.GOOGLE_CLIENT_ID)
+  : null;
+
+const shouldRequireTwoFactor = (user, settings) =>
+  !!(settings?.emailOtpEnabled && (user?.twoFactorEnabled || (settings?.twoFactorAuthEnabled && settings?.twoFactorRequired)));
+
+const beginTwoFactorLogin = async ({ user, email, settings, req, res }) => {
+  if (!settings.emailOtpEnabled) {
+    return res.status(503).json({ message: 'Email OTP is currently disabled. Please contact admin.' });
+  }
+  const otpRecord = await OTPCode.generate(email, 'login');
+  const sent = await sendOTPEmail({ email, name: user.name, otp: otpRecord.otp, purpose: 'login' });
+  if (!sent) {
+    return res.status(503).json({ message: 'Unable to send OTP email right now. Please try again later.' });
+  }
+  await log({ user, action: 'otp_requested', category: 'auth', ...fromReq(req) });
+  return res.status(200).json({ requiresOTP: true, email, message: 'An OTP has been sent to your email.' });
+};
 
 // ── Signup ────────────────────────────────────────────────────────────────────
 export const signup = async (req, res, next) => {
@@ -109,13 +131,8 @@ export const login = async (req, res, next) => {
 
     await user.resetFailedLogins();
 
-    if (settings.twoFactorAuthEnabled && settings.twoFactorRequired) {
-      const otpRecord = await OTPCode.generate(email, 'login');
-      if (settings.emailOtpEnabled) {
-        sendOTPEmail({ email, name: user.name, otp: otpRecord.otp, purpose: 'login' }).catch(logger.error);
-      }
-      await log({ user, action: 'otp_requested', category: 'auth', ...fromReq(req) });
-      return res.status(200).json({ requiresOTP: true, email, message: 'An OTP has been sent to your email.' });
+    if (shouldRequireTwoFactor(user, settings)) {
+      return beginTwoFactorLogin({ user, email, settings, req, res });
     }
 
     const { refreshToken } = setAuthCookies(res, user._id);
@@ -124,6 +141,80 @@ export const login = async (req, res, next) => {
     await log({ user, action: 'login', category: 'auth', ...fromReq(req) });
     res.json({ message: 'Login successful', user: sanitizeUser(user) });
   } catch (err) { next(err); }
+};
+
+export const googleAuth = async (req, res, next) => {
+  try {
+    const { credential, role } = req.body;
+    if (!credential) return next(new AppError('Google credential is required.', 400));
+    if (!googleClient || !process.env.GOOGLE_CLIENT_ID) {
+      return next(new AppError('Google sign-in is not configured on the server.', 503));
+    }
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    const email = payload?.email?.toLowerCase?.();
+
+    if (!payload || !email || !payload.email_verified) {
+      return next(new AppError('Unable to verify your Google account.', 401));
+    }
+
+    const settings = await getSettings();
+    if (settings.maintenanceMode) {
+      return next(new AppError(settings.maintenanceMessage, 503));
+    }
+
+    let user = await User.findOne({ email }).select('+refreshToken +failedLoginAttempts +accountLockedUntil');
+    const isNewUser = !user;
+
+    if (!user) {
+      if (!settings.allowNewRegistrations) {
+        return next(new AppError('New registrations are currently disabled.', 403));
+      }
+      user = await User.create({
+        name: payload.name || email.split('@')[0],
+        email,
+        password: crypto.randomBytes(24).toString('hex'),
+        role: role === 'instructor' ? 'instructor' : 'user',
+        avatar: payload.picture || '',
+        googleId: payload.sub,
+        authProvider: 'google',
+      });
+      await log({ user, action: 'signup_google', category: 'auth', ...fromReq(req) });
+      if (settings.emailWelcomeEnabled) {
+        sendWelcomeEmail({ email, name: user.name }).catch(logger.error);
+      }
+    } else {
+      if (user.isBlocked) return next(new AppError('Your account has been suspended. Contact support.', 403));
+      user.googleId = user.googleId || payload.sub;
+      user.authProvider = user.authProvider || 'google';
+      if (!user.avatar && payload.picture) user.avatar = payload.picture;
+      await user.save({ validateBeforeSave: false });
+    }
+
+    if (shouldRequireTwoFactor(user, settings)) {
+      return beginTwoFactorLogin({ user, email, settings, req, res });
+    }
+
+    const { refreshToken } = setAuthCookies(res, user._id);
+    await User.findByIdAndUpdate(user._id, { refreshToken });
+
+    await log({
+      user,
+      action: isNewUser ? 'login_google_after_signup' : 'login_google',
+      category: 'auth',
+      ...fromReq(req),
+    });
+    res.json({
+      message: isNewUser ? 'Account created with Google' : 'Signed in with Google',
+      user: sanitizeUser(user),
+    });
+  } catch (err) {
+    next(new AppError('Google sign-in failed. Please try again.', 401));
+  }
 };
 
 // ── Refresh ───────────────────────────────────────────────────────────────────
@@ -176,14 +267,21 @@ export const getMe = (req, res) => {
 export const forgotPassword = async (req, res, next) => {
   try {
     const { email } = req.body;
-    // Look up silently — always return same response to prevent email enumeration
     const user = await User.findOne({ email });
-    if (user && !user.isBlocked) {
-      const otpRecord = await OTPCode.generate(email, 'password_reset');
-      sendPasswordResetEmail({ email, name: user.name, otp: otpRecord.otp }).catch(logger.error);
-      await log({ user, action: 'password_reset_requested', category: 'auth', ...fromReq(req) });
+    if (!user) {
+      return next(new AppError('No account was found with this email address. Please check and try again.', 404));
     }
-    res.json({ message: 'If that email is registered, you will receive a reset code shortly.' });
+    if (user.isBlocked) {
+      return next(new AppError('This account is currently suspended. Please contact support.', 403));
+    }
+
+    const otpRecord = await OTPCode.generate(email, 'password_reset');
+    const sent = await sendPasswordResetEmail({ email, name: user.name, otp: otpRecord.otp });
+    if (!sent) {
+      return next(new AppError('Unable to send reset code right now. Please try again later.', 503));
+    }
+    await log({ user, action: 'password_reset_requested', category: 'auth', ...fromReq(req) });
+    res.json({ message: 'A reset code has been sent to your email address.' });
   } catch (err) { next(err); }
 };
 
@@ -226,8 +324,16 @@ export const requestOTP = async (req, res, next) => {
     const user = await User.findOne({ email });
     if (!user) return next(new AppError('User not found', 404));
 
+    const settings = await getSettings();
+    if (!settings.emailOtpEnabled) {
+      return next(new AppError('Email OTP is currently disabled. Please contact admin.', 503));
+    }
+
     const otpRecord = await OTPCode.generate(email, 'login');
-    sendOTPEmail({ email, name: user.name, otp: otpRecord.otp, purpose: 'login' }).catch(logger.error);
+    const sent = await sendOTPEmail({ email, name: user.name, otp: otpRecord.otp, purpose: 'login' });
+    if (!sent) {
+      return next(new AppError('Unable to send OTP email right now. Please try again later.', 503));
+    }
     await log({ user, action: 'otp_requested', category: 'auth', ...fromReq(req) });
     res.json({ message: 'OTP sent to your email address.' });
   } catch (err) { next(err); }
@@ -246,6 +352,8 @@ const sanitizeUser = (user) => ({
   badges: user.badges,
   totalExams: user.totalExams,
   avatar: user.avatar,
+  authProvider: user.authProvider || 'local',
+  twoFactorEnabled: !!user.twoFactorEnabled,
   isPublic: user.isPublic,
   plan: user.getEffectivePlan ? user.getEffectivePlan() : (user.plan || 'free'),
   planExpiresAt: user.planExpiresAt || null,

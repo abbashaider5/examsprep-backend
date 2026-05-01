@@ -16,6 +16,9 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true, minlength: 6, select: false },
   role: { type: String, enum: ['user', 'instructor', 'admin'], default: 'user' },
   avatar: { type: String, default: '' },
+  googleId: { type: String, default: null, index: true },
+  authProvider: { type: String, enum: ['local', 'google'], default: 'local' },
+  twoFactorEnabled: { type: Boolean, default: false },
 
   // Subscription / plan
   plan: { type: String, enum: ['free', 'pro', 'enterprise'], default: 'free' },

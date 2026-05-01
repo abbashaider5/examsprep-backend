@@ -6,6 +6,7 @@ import User from '../models/User.js';
 import { createNotificationsForUsers } from './notificationController.js';
 import { uploadGroupMedia } from '../services/cloudinaryService.js';
 import { sendGroupInviteEmail } from '../services/emailService.js';
+import { delCache, getCache, setCache } from '../services/cacheService.js';
 import logger from '../utils/logger.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -45,6 +46,7 @@ export async function createGroup(req, res) {
         isPrivate:   settings?.isPrivate   || false,
       },
     });
+    await delCache(`groups:${req.user._id}`);
     res.status(201).json({ group });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -53,6 +55,10 @@ export async function createGroup(req, res) {
 
 export async function getMyGroups(req, res) {
   try {
+    const key = `groups:${req.user._id}`;
+    const cached = await getCache(key);
+    if (cached) return res.json(cached);
+
     let groups;
     if (isInstructor(req.user)) {
       groups = await Group.find({ instructor: req.user._id, isActive: true })
@@ -77,7 +83,9 @@ export async function getMyGroups(req, res) {
       return { ...g, lastMessage: lastMsg, messageCount: msgCount };
     }));
 
-    res.json({ groups: withPreview });
+    const payload = { groups: withPreview };
+    await setCache(key, payload, 300);
+    res.json(payload);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -114,6 +122,7 @@ export async function updateGroup(req, res) {
     if (description !== undefined) group.description = description.trim();
     group.sharedExams = group.sharedExams.filter(se => se.exam != null);
     await group.save();
+    await delCache(`groups:${req.user._id}`);
     res.json({ group });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -137,6 +146,7 @@ export async function updateGroupSettings(req, res) {
     if (muteNotifications  !== undefined) group.settings.muteNotifications  = !!muteNotifications;
     group.sharedExams = group.sharedExams.filter(se => se.exam != null);
     await group.save();
+    await delCache(`groups:${req.user._id}`);
     res.json({ group });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -152,6 +162,7 @@ export async function deleteGroup(req, res) {
     }
     group.isActive = false;
     await group.save();
+    await delCache(`groups:${req.user._id}`);
     res.json({ message: 'Group deleted' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -200,6 +211,16 @@ export async function inviteMember(req, res) {
       acceptUrl,
       expiresAt: expiresStr,
     }).catch(logger.error);
+
+    if (existing) {
+      createNotificationsForUsers([existing._id], {
+        type: 'group_invite',
+        title: `Batch invitation: ${group.name}`,
+        message: `${req.user.name} invited you to join the batch "${group.name}". Review it from your dashboard or batches page.`,
+        link: '/dashboard',
+        meta: { groupId: group._id, inviteId: invite._id },
+      }).catch(logger.error);
+    }
 
     res.status(201).json({ message: 'Invite sent', invite: { email: normalised, status: 'pending' } });
   } catch (err) {
@@ -290,6 +311,28 @@ export async function acceptGroupInvite(req, res) {
       text: `${req.user.name} joined the group`,
     });
 
+    // In-app notification for the joined user
+    createNotificationsForUsers([req.user._id], {
+      type: 'batch_joined',
+      title: `You joined "${group?.name || 'a batch'}"`,
+      message: `Welcome! You are now a member of the batch "${group?.name || ''}". Check the Batches page to view shared tests.`,
+      link: '/batches',
+      meta: { groupId: invite.group },
+    }).catch(logger.error);
+
+    // Notify the instructor that a new member joined
+    if (group?.instructor) {
+      createNotificationsForUsers([group.instructor], {
+        type: 'batch_joined',
+        title: `New member in "${group.name}"`,
+        message: `${req.user.name} (${req.user.email}) has joined your batch "${group.name}".`,
+        link: '/batches',
+        meta: { groupId: group._id, userId: req.user._id },
+      }).catch(logger.error);
+    }
+
+    await delCache(`groups:${req.user._id}`, ...(group?.instructor ? [`groups:${group.instructor}`] : []));
+
     res.json({ message: 'Welcome to the group!', groupId: invite.group });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -333,8 +376,10 @@ export async function removeMember(req, res) {
     if (group.instructor.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({ message: 'Not your group' });
     }
-    group.members = group.members.filter(m => m.toString() !== req.params.userId);
+    const removedUserId = req.params.userId;
+    group.members = group.members.filter(m => m.toString() !== removedUserId);
     await group.save();
+    await delCache(`groups:${req.user._id}`, `groups:${removedUserId}`);
     res.json({ message: 'Member removed' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -353,6 +398,7 @@ export async function leaveGroup(req, res) {
       text: `${req.user.name} left the group`,
     });
 
+    await delCache(`groups:${req.user._id}`);
     res.json({ message: 'You left the group' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -397,6 +443,7 @@ export async function shareExam(req, res) {
       });
     }
 
+    await delCache(`groups:${req.user._id}`);
     res.json({ message: 'Exam shared with group' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -412,6 +459,7 @@ export async function unshareExam(req, res) {
     }
     group.sharedExams = group.sharedExams.filter(se => se.exam.toString() !== req.params.examId);
     await group.save();
+    await delCache(`groups:${req.user._id}`);
     res.json({ message: 'Exam removed from group' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -599,8 +647,22 @@ export async function bulkInviteMembers(req, res) {
         });
 
         const inviteUrl = `${CLIENT_URL}/groups/invite/${invite.token}`;
-        await sendGroupInviteEmail({ to: email, groupName: group.name, invitedByName: req.user.name, inviteUrl }).catch(() => {});
-        results.sent.push(email);
+        try {
+          await sendGroupInviteEmail({ to: email, groupName: group.name, invitedByName: req.user.name, inviteUrl });
+          if (existing) {
+            createNotificationsForUsers([existing._id], {
+              type: 'group_invite',
+              title: `Batch invitation: ${group.name}`,
+              message: `${req.user.name} invited you to join the batch "${group.name}". Review it from your dashboard or batches page.`,
+              link: '/dashboard',
+              meta: { groupId: group._id, inviteId: invite._id },
+            }).catch(logger.error);
+          }
+          results.sent.push(email);
+        } catch (emailErr) {
+          logger.error(`Failed to send group invite email to ${email}:`, emailErr.message);
+          results.failed.push({ email, reason: `Email delivery failed: ${emailErr.message}` });
+        }
       } catch (err) {
         results.failed.push({ email, reason: err.message });
       }
