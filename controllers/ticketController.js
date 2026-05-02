@@ -4,6 +4,16 @@ import { uploadTicketAttachment } from '../services/cloudinaryService.js';
 
 const parsePage = (value, fallback = 1) => Math.max(1, parseInt(value, 10) || fallback);
 
+const USER_ALLOWED_TYPES = [
+  'Login / Account Issue',
+  'AI Proctoring Issue',
+  'Result Issue',
+  'Payment / Subscription Issue',
+  'Platform Bug',
+  'Feature Request',
+  'Other',
+];
+
 export const createTicket = async (req, res, next) => {
   try {
     const { title, description, type } = req.body;
@@ -12,6 +22,9 @@ export const createTicket = async (req, res, next) => {
     }
     if (!TICKET_TYPES.includes(type)) {
       return next(new AppError('Invalid ticket type.', 400));
+    }
+    if (req.user?.role === 'user' && !USER_ALLOWED_TYPES.includes(type)) {
+      return next(new AppError('Invalid ticket type for this account.', 400));
     }
 
     let attachment = null;

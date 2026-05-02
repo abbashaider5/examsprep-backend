@@ -7,6 +7,7 @@ import User from '../models/User.js';
 import OTPCode from '../models/OTPCode.js';
 import { getSettings } from '../models/SystemSettings.js';
 import { sendWelcomeEmail, sendOTPEmail, sendSecurityAlertEmail, sendPasswordResetEmail } from '../services/emailService.js';
+import { verifyRecaptchaToken } from '../services/recaptchaService.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
 
@@ -33,6 +34,7 @@ const beginTwoFactorLogin = async ({ user, email, settings, req, res }) => {
 // ── Signup ────────────────────────────────────────────────────────────────────
 export const signup = async (req, res, next) => {
   try {
+    await verifyRecaptchaToken(req.body?.recaptchaToken);
     const settings = await getSettings();
     if (!settings.allowNewRegistrations) {
       return next(new AppError('New registrations are currently disabled.', 403));
@@ -101,6 +103,7 @@ export const verifyOTP = async (req, res, next) => {
 // ── Login ─────────────────────────────────────────────────────────────────────
 export const login = async (req, res, next) => {
   try {
+    await verifyRecaptchaToken(req.body?.recaptchaToken);
     const { email, password } = req.body;
     const settings = await getSettings();
 
