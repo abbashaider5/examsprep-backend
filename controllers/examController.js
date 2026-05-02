@@ -1,19 +1,19 @@
+import http from 'http';
+import https from 'https';
 import { AppError } from '../middleware/errorHandler.js';
 import Exam from '../models/Exam.js';
 import ExamInvite from '../models/ExamInvite.js';
 import Group from '../models/Group.js';
 import Resource from '../models/Resource.js';
 import Screenshot from '../models/Screenshot.js';
-import User from '../models/User.js';
 import {
-  analyzeProctoringImage,
-  generateCodingQuestions, generateDescriptiveQuestions, generateMCQs,
-  generateQuestionsFromText, generateSingleQuestion,
+    analyzeProctoringImage,
+    generateCodingQuestions, generateDescriptiveQuestions, generateMCQs,
+    generateQuestionsFromText, generateSingleQuestion,
 } from '../services/aiService.js';
-import { isCloudinaryConfigured, uploadScreenshot } from '../services/cloudinaryService.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
-import https from 'https';
-import http from 'http';
+import { isCloudinaryConfigured, uploadScreenshot } from '../services/cloudinaryService.js';
+import logger from '../utils/logger.js';
 
 const downloadBuffer = (url) => new Promise((resolve, reject) => {
   const lib = url.startsWith('https') ? https : http;
@@ -76,7 +76,7 @@ export const createExam = async (req, res, next) => {
             resolvedContextText = (await parsePDFBuffer(buf)).slice(0, 60000);
           } catch (fetchErr) {
             // Non-fatal: fall back to regular AI generation
-            console.warn('[createExam] Resource fetch/parse failed:', fetchErr.message);
+            logger.warn('[createExam] Resource fetch/parse failed: ' + fetchErr.message);
           }
         }
       }

@@ -43,7 +43,12 @@ import resourceRoutes from './routes/resources.js';
 import ticketRoutes from './routes/tickets.js';
 
 const app = express();
-connectDB();
+
+// Connect DB before serving traffic (prevents intermittent 503 on startup).
+let mongoBootError = null;
+await connectDB().catch((e) => {
+  mongoBootError = e;
+});
 
 // If DB is down, fail fast (don't let Mongoose buffer requests indefinitely in dev)
 mongoose.set('bufferCommands', false);
@@ -96,6 +101,13 @@ app.use((req, res, next) => {
   return res.status(503).json({
     message:
       'Database unavailable. Start a local MongoDB or whitelist your IP in MongoDB Atlas, then restart the server.',
+    details:
+      process.env.NODE_ENV === 'development'
+        ? {
+            mongoReadyState: mongoose.connection.readyState,
+            bootError: mongoBootError?.message || null,
+          }
+        : undefined,
   });
 });
 
