@@ -6,7 +6,7 @@ import {
   getMyTickets,
   updateTicketAdmin,
 } from '../controllers/ticketController.js';
-import { protect, requireAdmin, requireInstructor } from '../middleware/auth.js';
+import { protect, requireAdmin } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -27,8 +27,9 @@ const upload = multer({
 
 router.use(protect);
 
-router.post('/', requireInstructor, upload.single('attachment'), createTicket);
-router.get('/mine', requireInstructor, getMyTickets);
+// Any authenticated user can raise/view their own tickets.
+router.post('/', upload.single('attachment'), createTicket);
+router.get('/mine', getMyTickets);
 
 router.get('/admin', requireAdmin, getAllTicketsAdmin);
 router.patch('/admin/:id', requireAdmin, updateTicketAdmin);
