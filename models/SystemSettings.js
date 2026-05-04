@@ -12,6 +12,7 @@ const systemSettingsSchema = new mongoose.Schema({
   // Auth & Security
   twoFactorAuthEnabled: { type: Boolean, default: false },
   twoFactorRequired: { type: Boolean, default: false },
+  recaptchaLoginSignupEnabled: { type: Boolean, default: false },
   maxLoginAttempts: { type: Number, default: 5 },
   lockoutDurationMinutes: { type: Number, default: 30 },
   sessionTimeoutMinutes: { type: Number, default: 15 },

@@ -12,7 +12,7 @@ export const updateSystemSettings = async (req, res, next) => {
   try {
     const allowedKeys = [
       'maintenanceMode', 'maintenanceMessage', 'allowNewRegistrations', 'platformName',
-      'twoFactorAuthEnabled', 'twoFactorRequired', 'maxLoginAttempts', 'lockoutDurationMinutes', 'sessionTimeoutMinutes',
+      'twoFactorAuthEnabled', 'twoFactorRequired', 'recaptchaLoginSignupEnabled', 'maxLoginAttempts', 'lockoutDurationMinutes', 'sessionTimeoutMinutes',
       'maxExamsPerDay', 'maxQuestionsPerExam', 'minQuestionsPerExam', 'allowedDifficulties',
       'emailWelcomeEnabled', 'emailResultEnabled', 'emailCertificateEnabled',
       'emailSecurityAlertEnabled', 'emailProctoringViolationEnabled', 'emailOtpEnabled',
@@ -40,12 +40,18 @@ export const updateSystemSettings = async (req, res, next) => {
 export const getPublicSettings = async (req, res, next) => {
   try {
     const settings = await getSettings();
+    const recaptchaWant = settings.recaptchaLoginSignupEnabled !== false;
+    const recaptchaSecretOk = !!process.env.RECAPTCHA_SECRET_KEY;
     res.json({
       maintenanceMode: settings.maintenanceMode,
       maintenanceMessage: settings.maintenanceMessage,
       allowNewRegistrations: settings.allowNewRegistrations,
       twoFactorAuthEnabled: settings.twoFactorAuthEnabled,
       twoFactorRequired: settings.twoFactorRequired,
+      /** Admin wants reCAPTCHA on email/password flows (may still be inactive if keys are missing). */
+      recaptchaLoginSignupEnabled: recaptchaWant,
+      /** Backend will reject login/sign-up without a valid token — only true when toggle is on AND RECAPTCHA_SECRET_KEY is set. */
+      recaptchaEnforced: recaptchaWant && recaptchaSecretOk,
       proctoringEnabled: settings.proctoringEnabled,
       studyModeEnabled: settings.studyModeEnabled,
       leaderboardEnabled: settings.leaderboardEnabled,

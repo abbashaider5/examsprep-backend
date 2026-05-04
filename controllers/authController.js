@@ -15,6 +15,10 @@ const googleClient = process.env.GOOGLE_CLIENT_ID
   ? new OAuth2Client(process.env.GOOGLE_CLIENT_ID)
   : null;
 
+/** True when login/sign-up must verify a reCAPTCHA token (admin toggle on + secret key configured). */
+const recaptchaEnforcedForCredentials = (settings) =>
+  settings.recaptchaLoginSignupEnabled !== false && !!process.env.RECAPTCHA_SECRET_KEY;
+
 const shouldRequireTwoFactor = (user, settings) =>
   !!(settings?.emailOtpEnabled && (user?.twoFactorEnabled || (settings?.twoFactorAuthEnabled && settings?.twoFactorRequired)));
 
@@ -34,8 +38,10 @@ const beginTwoFactorLogin = async ({ user, email, settings, req, res }) => {
 // ── Signup ────────────────────────────────────────────────────────────────────
 export const signup = async (req, res, next) => {
   try {
-    await verifyRecaptchaToken(req.body?.recaptchaToken);
     const settings = await getSettings();
+    if (recaptchaEnforcedForCredentials(settings)) {
+      await verifyRecaptchaToken(req.body?.recaptchaToken);
+    }
     if (!settings.allowNewRegistrations) {
       return next(new AppError('New registrations are currently disabled.', 403));
     }
@@ -103,9 +109,11 @@ export const verifyOTP = async (req, res, next) => {
 // ── Login ─────────────────────────────────────────────────────────────────────
 export const login = async (req, res, next) => {
   try {
-    await verifyRecaptchaToken(req.body?.recaptchaToken);
-    const { email, password } = req.body;
     const settings = await getSettings();
+    if (recaptchaEnforcedForCredentials(settings)) {
+      await verifyRecaptchaToken(req.body?.recaptchaToken);
+    }
+    const { email, password } = req.body;
 
     if (settings.maintenanceMode) {
       return next(new AppError(settings.maintenanceMessage, 503));
