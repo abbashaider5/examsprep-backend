@@ -3,7 +3,10 @@ import jwt from 'jsonwebtoken';
 import { OAuth2Client } from 'google-auth-library';
 import { setAuthCookies, clearAuthCookies, signAccessToken, isProd } from '../middleware/auth.js';
 import { AppError } from '../middleware/errorHandler.js';
+import ExamInvite from '../models/ExamInvite.js';
+import Exam from '../models/Exam.js';
 import User from '../models/User.js';
+import { createNotificationsForUsers } from './notificationController.js';
 import OTPCode from '../models/OTPCode.js';
 import { getSettings } from '../models/SystemSettings.js';
 import { sendWelcomeEmail, sendOTPEmail, sendSecurityAlertEmail, sendPasswordResetEmail } from '../services/emailService.js';
@@ -14,6 +17,33 @@ import logger from '../utils/logger.js';
 const googleClient = process.env.GOOGLE_CLIENT_ID
   ? new OAuth2Client(process.env.GOOGLE_CLIENT_ID)
   : null;
+
+/** Accept pending exam invite when token matches email; optional in-app nudge. */
+async function acceptExamInviteForNewUser(user, token) {
+  if (!token || typeof token !== 'string') return null;
+  const invite = await ExamInvite.findOne({
+    token: token.trim(),
+    email: user.email.toLowerCase(),
+    status: 'pending',
+  });
+  if (!invite) return null;
+  invite.status = 'accepted';
+  await invite.save();
+
+  const exam = await Exam.findById(invite.exam).select('title').lean();
+  const title = exam?.title || 'your test';
+  const examPath = `/exam/${invite.exam.toString()}?invite=${invite.token}`;
+  createNotificationsForUsers([user._id], {
+    type: 'exam_invite',
+    title: 'Test ready to take',
+    message: `You're enrolled for "${title}". Start it from My Tests or open it now.`,
+    link: '/tests',
+    severity: 'info',
+    meta: { examId: invite.exam.toString(), inviteToken: invite.token },
+  }).catch(logger.error);
+
+  return examPath;
+}
 
 /** True when login/sign-up must verify a reCAPTCHA token (admin toggle on + secret key configured). */
 const recaptchaEnforcedForCredentials = (settings) =>
@@ -46,7 +76,7 @@ export const signup = async (req, res, next) => {
       return next(new AppError('New registrations are currently disabled.', 403));
     }
 
-    const { name, email, password } = req.body;
+    const { name, email, password, examInviteToken } = req.body;
     const existing = await User.findOne({ email });
     if (existing) return next(new AppError('An account with this email already exists.', 409));
 
@@ -59,7 +89,12 @@ export const signup = async (req, res, next) => {
       if (settings.emailOtpEnabled) {
         sendOTPEmail({ email, name, otp: otp.otp, purpose: 'signup' }).catch(logger.error);
       }
-      return res.status(200).json({ requiresOTP: true, email, message: 'Verify your email to complete signup.' });
+      return res.status(200).json({
+        requiresOTP: true,
+        email,
+        examInviteToken: examInviteToken || null,
+        message: 'Verify your email to complete signup.',
+      });
     }
 
     const { refreshToken } = setAuthCookies(res, user._id);
@@ -69,14 +104,23 @@ export const signup = async (req, res, next) => {
       sendWelcomeEmail({ email, name }).catch(logger.error);
     }
 
-    res.status(201).json({ message: 'Account created successfully', user: sanitizeUser(user) });
+    let redirectPath = null;
+    if (examInviteToken) {
+      redirectPath = await acceptExamInviteForNewUser(user, examInviteToken);
+    }
+
+    res.status(201).json({
+      message: 'Account created successfully',
+      user: sanitizeUser(user),
+      redirectPath,
+    });
   } catch (err) { next(err); }
 };
 
 // ── Verify OTP (completes signup or login) ────────────────────────────────────
 export const verifyOTP = async (req, res, next) => {
   try {
-    const { email, otp, purpose = 'login' } = req.body;
+    const { email, otp, purpose = 'login', examInviteToken } = req.body;
     if (!email || !otp) return next(new AppError('Email and OTP are required', 400));
 
     const result = await OTPCode.verify(email, otp, purpose);
@@ -102,7 +146,13 @@ export const verifyOTP = async (req, res, next) => {
     await User.findByIdAndUpdate(user._id, { refreshToken });
 
     await log({ user, action: 'otp_verified', category: 'auth', metadata: { purpose }, ...fromReq(req) });
-    res.json({ message: 'Verified successfully', user: sanitizeUser(user) });
+
+    let redirectPath = null;
+    if (purpose === 'signup' && examInviteToken) {
+      redirectPath = await acceptExamInviteForNewUser(user, examInviteToken);
+    }
+
+    res.json({ message: 'Verified successfully', user: sanitizeUser(user), redirectPath });
   } catch (err) { next(err); }
 };
 
@@ -156,7 +206,7 @@ export const login = async (req, res, next) => {
 
 export const googleAuth = async (req, res, next) => {
   try {
-    const { credential, role } = req.body;
+    const { credential, role, examInviteToken } = req.body;
     if (!credential) return next(new AppError('Google credential is required.', 400));
     if (!googleClient || !process.env.GOOGLE_CLIENT_ID) {
       return next(new AppError('Google sign-in is not configured on the server.', 503));
@@ -219,9 +269,16 @@ export const googleAuth = async (req, res, next) => {
       category: 'auth',
       ...fromReq(req),
     });
+
+    let redirectPath = null;
+    if (examInviteToken && typeof examInviteToken === 'string') {
+      redirectPath = await acceptExamInviteForNewUser(user, examInviteToken);
+    }
+
     res.json({
       message: isNewUser ? 'Account created with Google' : 'Signed in with Google',
       user: sanitizeUser(user),
+      ...(redirectPath ? { redirectPath } : {}),
     });
   } catch (err) {
     next(new AppError('Google sign-in failed. Please try again.', 401));
@@ -363,12 +420,23 @@ const sanitizeUser = (user) => ({
   badges: user.badges,
   totalExams: user.totalExams,
   avatar: user.avatar,
+  schoolName: user.schoolName || '',
+  address: {
+    country: user.address?.country || '',
+    state: user.address?.state || '',
+    city: user.address?.city || '',
+    zipCode: user.address?.zipCode || '',
+  },
+  country: user.address?.country || '',
+  createdAt: user.createdAt,
   authProvider: user.authProvider || 'local',
   twoFactorEnabled: !!user.twoFactorEnabled,
   isPublic: user.isPublic,
   plan: user.getEffectivePlan ? user.getEffectivePlan() : (user.plan || 'free'),
+  autoRenew: !!user.autoRenew,
   planExpiresAt: user.planExpiresAt || null,
   planStatus: user.plan === 'free' ? 'free' : (user.planExpiresAt && user.planExpiresAt < new Date() ? 'expired' : 'active'),
   remaining: user.getRemainingExams ? user.getRemainingExams() : null,
   monthlyLimit: user.getMonthlyLimit ? user.getMonthlyLimit() : 3,
+  lifetimeExamsCreated: user.lifetimeExamsCreated ?? 0,
 });

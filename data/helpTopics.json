@@ -1,0 +1,451 @@
+[
+  {
+    "id": "dashboard-overview",
+    "title": "Dashboard overview",
+    "description": "Understand your home dashboard, stats, and quick actions after signing in.",
+    "category": "Getting started",
+    "keywords": ["dashboard", "home", "overview", "widgets", "stats", "quick actions"],
+    "sections": [
+      {
+        "heading": "What you’ll see",
+        "paragraphs": [
+          "Your dashboard is the starting point after login. It surfaces progress, recent activity, and shortcuts to tests and study tools.",
+          "Students see learning-focused cards (tests, performance, certificates). Instructors see workspace shortcuts to create tests, batches, and reports."
+        ]
+      },
+      {
+        "heading": "Tips",
+        "bullets": [
+          "Use the sidebar to jump to any major area without returning here.",
+          "Your role (student, instructor, admin) controls which pages are available.",
+          "Use the refresh icon in the header to reload data across the app."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "create-tests",
+    "title": "How to create tests",
+    "description": "Build exams with AI assistance, upload sources, and configure timing and proctoring.",
+    "category": "Tests",
+    "keywords": ["create", "exam", "test", "mcq", "generator", "ai", "questions"],
+    "sections": [
+      {
+        "heading": "Getting started",
+        "paragraphs": [
+          "Go to **Create test** from the sidebar or instructor hub. You can describe what you want to assess, upload a PDF for parsing (when supported), and set subject, difficulty, and question count."
+        ]
+      },
+      {
+        "heading": "Configuration",
+        "bullets": [
+          "Set time per question or total duration where applicable.",
+          "Enable proctoring if you need tab-focus and violation tracking.",
+          "Choose whether students see answers after submission and if reattempts are allowed.",
+          "Optionally set an expiry date for access to the test."
+        ]
+      },
+      {
+        "heading": "After creation",
+        "paragraphs": [
+          "You can edit questions in the question editor, regenerate individual items, and invite students when the test is ready."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "manage-tests",
+    "title": "How to manage tests",
+    "description": "Edit, delete, invite learners, and review high-level stats from one place.",
+    "category": "Tests",
+    "keywords": ["manage", "edit", "delete", "tests", "all tests", "study"],
+    "sections": [
+      {
+        "heading": "All tests / My tests",
+        "paragraphs": [
+          "Open **All tests** from the sidebar. Instructors see tests they own; students see assigned and personal tests depending on your setup."
+        ]
+      },
+      {
+        "heading": "Actions",
+        "bullets": [
+          "**Edit** opens settings and content for tests you own.",
+          "**Invite** sends email invites when your workflow uses invitations.",
+          "**Report** opens analytics and candidate detail for that exam.",
+          "**Delete** removes a test you own (often with a confirmation dialog)."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "invite-students",
+    "title": "How to invite students",
+    "description": "Send invites by email, bulk file, or batch so learners can access your tests.",
+    "category": "Students",
+    "keywords": ["invite", "email", "students", "batch", "excel", "csv"],
+    "sections": [
+      {
+        "heading": "Single or bulk email",
+        "paragraphs": [
+          "From the instructor hub or test card, choose **Invite**. Enter one email, or switch to bulk upload and use a spreadsheet with addresses (supported formats are indicated in the UI)."
+        ]
+      },
+      {
+        "heading": "Invite by batch",
+        "bullets": [
+          "Select an existing **batch** (group) to invite every member at once.",
+          "Ensure students have accounts or can complete signup from the invite link if your flow requires it."
+        ]
+      },
+      {
+        "heading": "Tracking",
+        "paragraphs": [
+          "Reports show who was invited, who accepted, and outcomes per candidate. Detailed views still list every attempt."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "create-batches",
+    "title": "How to create batches",
+    "description": "Organize students into groups for shared invites, messaging, and shared exams.",
+    "category": "Batches",
+    "keywords": ["batch", "group", "class", "cohort", "members"],
+    "sections": [
+      {
+        "heading": "Create a batch",
+        "paragraphs": [
+          "Open **Batches** in the sidebar. Create a new batch with a clear name, then add members by email or invite links depending on your permissions."
+        ]
+      },
+      {
+        "heading": "Using batches",
+        "bullets": [
+          "Invite a whole batch to a test instead of typing emails one by one.",
+          "Use batch context for communication where the product supports it.",
+          "Manage membership from the batch detail screen."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "view-reports",
+    "title": "How to view reports",
+    "description": "Read exam-level summaries, per-student outcomes, and export-friendly detail.",
+    "category": "Reports",
+    "keywords": ["report", "analytics", "results", "instructor", "scores"],
+    "sections": [
+      {
+        "heading": "Exam report",
+        "paragraphs": [
+          "From **Test reports** or a test’s **Report** button, open the exam report. Summary cards show invites, attempts, pass/fail, and averages based on unique learners (latest attempt where noted)."
+        ]
+      },
+      {
+        "heading": "Candidate detail",
+        "bullets": [
+          "Open a student to see attempts, scores, and question-level breakdown when available.",
+          "Screenshots may appear if proctoring capture is enabled for that exam."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "evaluate-answers",
+    "title": "How to evaluate answers",
+    "description": "Review subjective items, adjust scoring when allowed, and use AI-assisted feedback.",
+    "category": "Reports",
+    "keywords": ["evaluate", "grade", "reevaluate", "answers", "subjective", "ai"],
+    "sections": [
+      {
+        "heading": "Student report view",
+        "paragraphs": [
+          "In the per-student report, review each question. Where the product allows, you can override correctness or scores and save—updates refresh the displayed result."
+        ]
+      },
+      {
+        "heading": "Best practices",
+        "bullets": [
+          "Align overrides with your institution’s policy.",
+          "Use notes or feedback fields when present so learners understand changes.",
+          "Re-run exports or notifications only if your workflow includes them."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "take-exam",
+    "title": "Taking an exam",
+    "description": "Start a test, follow proctoring rules, submit, and view your result.",
+    "category": "Study",
+    "keywords": ["exam", "attempt", "submit", "timer", "proctor"],
+    "sections": [
+      {
+        "heading": "Before you start",
+        "bullets": [
+          "Stable internet and a quiet environment help avoid proctoring flags.",
+          "Read the instructions and time limits shown on the start screen."
+        ]
+      },
+      {
+        "heading": "During the exam",
+        "paragraphs": [
+          "Answer questions in order or navigate using the question list if provided. Avoid switching tabs if proctoring warns against it."
+        ]
+      },
+      {
+        "heading": "After submission",
+        "paragraphs": [
+          "You’ll see your score and explanations depending on instructor settings. Certificates may generate automatically when you pass and the exam allows them."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "study-mode-flashcards",
+    "title": "Study mode & flashcards",
+    "description": "Practice with flashcards and review modes from the Tests page when enabled.",
+    "category": "Study",
+    "keywords": ["study", "flashcards", "review", "practice", "tests page"],
+    "sections": [
+      {
+        "heading": "Opening study mode",
+        "paragraphs": [
+          "From **My tests**, pick a test and use **Study** when available. Modes depend on what the instructor enabled (flashcards, review, etc.)."
+        ]
+      },
+      {
+        "heading": "Tips",
+        "bullets": [
+          "Study mode does not replace the graded exam—passing still requires the formal attempt if required.",
+          "Use filters and search on the tests list to find content quickly."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "certificates",
+    "title": "Certificates",
+    "description": "Earn, download, and verify certificates after passing eligible exams.",
+    "category": "Account",
+    "keywords": ["certificate", "pdf", "verify", "download", "badge"],
+    "sections": [
+      {
+        "heading": "Students",
+        "paragraphs": [
+          "Open **Certificates** to see earned credentials. Download PDFs and share verify links or QR codes where shown."
+        ]
+      },
+      {
+        "heading": "Instructors",
+        "paragraphs": [
+          "Instructors typically manage issuance through reports and student outcomes; student certificates issued for your tests may appear in the student-certificates view where enabled."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "leaderboard-performance",
+    "title": "Leaderboard & performance",
+    "description": "Compare progress and review your own analytics over time.",
+    "category": "Study",
+    "keywords": ["leaderboard", "performance", "xp", "rank", "stats"],
+    "sections": [
+      {
+        "heading": "Leaderboard",
+        "paragraphs": [
+          "The public leaderboard shows rankings based on platform rules (e.g. XP or scores). Availability may depend on your organization’s settings."
+        ]
+      },
+      {
+        "heading": "Performance page",
+        "paragraphs": [
+          "Your **Performance** view summarizes attempts, trends, and weak areas where the product surfaces them—use it to prioritize practice."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "profile-settings",
+    "title": "Profile & settings",
+    "description": "Update your account, password, plan visibility, and preferences.",
+    "category": "Account",
+    "keywords": ["profile", "password", "settings", "account", "plan"],
+    "sections": [
+      {
+        "heading": "Profile",
+        "bullets": [
+          "Change display name and review email where editable.",
+          "Upgrade plan links appear when your organization uses paid tiers."
+        ]
+      },
+      {
+        "heading": "Security",
+        "paragraphs": [
+          "Use a strong password and complete password reset via **Forgot password** if you lose access."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pricing-plans",
+    "title": "Pricing & plans",
+    "description": "Understand tiers, limits, and where to upgrade.",
+    "category": "Account",
+    "keywords": ["pricing", "plan", "pro", "enterprise", "upgrade", "billing"],
+    "sections": [
+      {
+        "heading": "Plans",
+        "paragraphs": [
+          "Visit **Pricing** from the marketing navigation or footer. Plans may cap exams per month, features like AI generation, or instructor capabilities."
+        ]
+      },
+      {
+        "heading": "Billing",
+        "paragraphs": [
+          "Payment flows (e.g. cards) are handled on the checkout screens linked from pricing. Contact support for invoicing if your contract requires it."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "tickets-support",
+    "title": "Tickets & support",
+    "description": "Open requests and track responses when something breaks or you need help.",
+    "category": "Support",
+    "keywords": ["ticket", "support", "help", "issue", "bug"],
+    "sections": [
+      {
+        "heading": "Ticketing",
+        "paragraphs": [
+          "Use **Ticketing** from the sidebar footer area to create a ticket. Describe steps, expected vs actual behavior, and attach screenshots if useful."
+        ]
+      },
+      {
+        "heading": "Contact",
+        "paragraphs": [
+          "For general inquiries, the **Contact** page may reach your operators directly—use whichever channel your organization prefers."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "notifications",
+    "title": "Notifications",
+    "description": "Stay informed about invites, batches, and system messages.",
+    "category": "Account",
+    "keywords": ["notifications", "bell", "alerts", "batch"],
+    "sections": [
+      {
+        "heading": "Bell menu",
+        "paragraphs": [
+          "Click the notification bell in the header to read and dismiss items. Important invites may appear here as well as in email."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "admin-overview",
+    "title": "Admin panel overview",
+    "description": "High-level platform management for administrators.",
+    "category": "Administration",
+    "keywords": ["admin", "users", "settings", "platform"],
+    "sections": [
+      {
+        "heading": "Access",
+        "paragraphs": [
+          "Admins open **Admin** from the sidebar to manage users, plans, announcements, logs, and system settings—depending on deployment configuration."
+        ]
+      },
+      {
+        "heading": "Guidelines",
+        "bullets": [
+          "Restrict destructive actions to trusted operators.",
+          "Review audit logs where available before sensitive changes."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "instructor-hub",
+    "title": "Instructor hub",
+    "description": "Central place for instructors to jump to creation, tests, reports, and invites.",
+    "category": "Instructor",
+    "keywords": ["instructor", "hub", "dashboard", "workspace"],
+    "sections": [
+      {
+        "heading": "Navigation",
+        "paragraphs": [
+          "The instructor dashboard lists your tests with summary stats (unique students, pass/fail, not attempted). Use **Report** for deep dives per exam."
+        ]
+      },
+      {
+        "heading": "Shortcuts",
+        "bullets": [
+          "**Create test** for new exams.",
+          "**Test reports** for aggregate analytics.",
+          "**Batches** for groups and batch invites."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "proctoring-basics",
+    "title": "Proctoring basics",
+    "description": "What proctoring monitors and how to avoid violations.",
+    "category": "Study",
+    "keywords": ["proctor", "violation", "tab", "focus", "monitor"],
+    "sections": [
+      {
+        "heading": "Behavior",
+        "paragraphs": [
+          "When enabled, the exam may warn or terminate after repeated tab switches, idle periods, or other rules configured for your deployment."
+        ]
+      },
+      {
+        "heading": "Candidates",
+        "bullets": [
+          "Keep one window focused on the exam.",
+          "Avoid copy/paste unless explicitly allowed.",
+          "Contact your instructor if you believe a flag was incorrect."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "results-page",
+    "title": "Understanding your results",
+    "description": "Read score breakdowns, explanations, and certificate eligibility.",
+    "category": "Study",
+    "keywords": ["result", "score", "percentage", "passed", "failed"],
+    "sections": [
+      {
+        "heading": "After submit",
+        "paragraphs": [
+          "The results page shows total score, pass/fail vs the passing threshold, and per-question feedback when the instructor allows it."
+        ]
+      },
+      {
+        "heading": "Reattempts",
+        "paragraphs": [
+          "If reattempts are enabled, you may start again from **My tests** until limits or expiry apply."
+        ]
+      }
+    ]
+  },
+  {
+    "id": "verify-certificate",
+    "title": "Verify a certificate",
+    "description": "Anyone can validate a certificate ID or QR code.",
+    "category": "Account",
+    "keywords": ["verify", "certificate id", "qr", "authentic"],
+    "sections": [
+      {
+        "heading": "Public verify",
+        "paragraphs": [
+          "Use the verify URL or scan the QR from a PDF. The page confirms issuance details when the certificate exists and is active."
+        ]
+      }
+    ]
+  }
+]

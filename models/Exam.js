@@ -52,6 +52,10 @@ const examSchema = new mongoose.Schema({
   showAnswersToUser:   { type: Boolean, default: true },
   // Expiry
   expiryDate:          { type: Date, default: null },
+
+  /** When true, questionVariants holds 3 shuffled copies (same N questions each); counts as 3 toward creator usage */
+  multipleSets: { type: Boolean, default: false },
+  questionVariants: { type: mongoose.Schema.Types.Mixed, default: null },
 }, { timestamps: true });
 
 // Pre-save: only set timePerQuestion from difficulty if not explicitly provided

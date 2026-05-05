@@ -1,6 +1,7 @@
 import { AppError } from '../middleware/errorHandler.js';
 import Ticket, { TICKET_STATUSES, TICKET_TYPES } from '../models/Ticket.js';
 import { uploadTicketAttachment } from '../services/cloudinaryService.js';
+import { sendTicketCreatedEmail, sendTicketUpdatedEmail } from '../services/emailService.js';
 
 const parsePage = (value, fallback = 1) => Math.max(1, parseInt(value, 10) || fallback);
 
@@ -39,6 +40,15 @@ export const createTicket = async (req, res, next) => {
       type,
       attachment: attachment || undefined,
     });
+
+    sendTicketCreatedEmail({
+      email: req.user.email,
+      name: req.user.name,
+      ticketId: ticket.ticketId,
+      title: ticket.title,
+      type: ticket.type,
+      status: ticket.status,
+    }).catch(() => {});
 
     res.status(201).json({ message: 'Ticket created successfully.', ticket });
   } catch (err) {
@@ -124,6 +134,19 @@ export const updateTicketAdmin = async (req, res, next) => {
       .populate('user', 'name email role')
       .populate('respondedBy', 'name email');
     if (!ticket) return next(new AppError('Ticket not found.', 404));
+
+    const statusChanged = typeof updates.status !== 'undefined';
+    const responseChanged = typeof updates.adminResponse !== 'undefined';
+    if (statusChanged || responseChanged) {
+      sendTicketUpdatedEmail({
+        email: ticket.user?.email,
+        name: ticket.user?.name,
+        ticketId: ticket.ticketId,
+        status: ticket.status,
+        adminResponse: ticket.adminResponse,
+      }).catch(() => {});
+    }
+
     res.json({ message: 'Ticket updated.', ticket });
   } catch (err) {
     next(err);

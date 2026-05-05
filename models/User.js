@@ -16,14 +16,24 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true, minlength: 6, select: false },
   role: { type: String, enum: ['user', 'instructor', 'admin'], default: 'user' },
   avatar: { type: String, default: '' },
+  schoolName: { type: String, trim: true, maxlength: 120, default: '' },
+  address: {
+    country: { type: String, trim: true, maxlength: 100, default: '' },
+    state: { type: String, trim: true, maxlength: 100, default: '' },
+    city: { type: String, trim: true, maxlength: 100, default: '' },
+    zipCode: { type: String, trim: true, maxlength: 20, default: '' },
+  },
   googleId: { type: String, default: null, index: true },
   authProvider: { type: String, enum: ['local', 'google'], default: 'local' },
   twoFactorEnabled: { type: Boolean, default: false },
 
   // Subscription / plan
   plan: { type: String, enum: ['free', 'pro', 'enterprise'], default: 'free' },
+  autoRenew: { type: Boolean, default: false },
   planExpiresAt: { type: Date, default: null },
   examsCreatedThisMonth: { type: Number, default: 0 },
+  /** Lifetime count of exams created; never decreased when a test is deleted (usage / analytics). */
+  lifetimeExamsCreated: { type: Number, default: 0 },
   monthlyExamResetDate: { type: Date, default: null },
 
   // Gamification

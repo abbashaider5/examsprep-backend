@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { AppError } from '../middleware/errorHandler.js';
 import Exam from '../models/Exam.js';
 import ExamInvite from '../models/ExamInvite.js';
@@ -5,11 +6,43 @@ import Group from '../models/Group.js';
 import Result from '../models/Result.js';
 import Screenshot from '../models/Screenshot.js';
 import User from '../models/User.js';
+import UserExamShuffle from '../models/UserExamShuffle.js';
+import { buildInstructorExamReportData } from '../utils/instructorExamReportData.js';
+import { buildDisplayQuestions, getBaseQuestionsForExam } from '../utils/examShuffleRuntime.js';
 import { getSettings } from '../models/SystemSettings.js';
 import { sendInstructorInviteEmail } from '../services/emailService.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
 import { fromReq, log } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
+import { computeResultMetrics } from '../utils/resultMetrics.js';
+import { createNotificationsForUsers } from './notificationController.js';
+
+/** Ensures answers are always a plain array for JSON / frontend iteration. */
+function normalizeAnswersArray(ans) {
+  if (!ans) return [];
+  if (Array.isArray(ans)) return ans;
+  if (typeof ans === 'object') {
+    const keys = Object.keys(ans);
+    const numeric = keys.filter(k => /^\d+$/.test(k));
+    if (numeric.length) {
+      return numeric.sort((a, b) => Number(a) - Number(b)).map(k => ans[k]).filter(Boolean);
+    }
+    return Object.values(ans).filter(v => v != null && typeof v === 'object');
+  }
+  return [];
+}
+
+function topicAccuracyToPlain(ta) {
+  if (ta == null) return {};
+  if (ta instanceof Map) return Object.fromEntries(ta);
+  if (typeof ta === 'object' && !Array.isArray(ta)) return { ...ta };
+  return {};
+}
+
+const xpFromPercentage = (percentage, difficulty) => {
+  const base = { easy: 10, medium: 20, hard: 35 };
+  return Math.round((base[difficulty] || 10) * (percentage / 100));
+};
 
 // POST /api/instructor/become
 export const becomeInstructor = async (req, res, next) => {
@@ -70,8 +103,19 @@ export const sendInvite = async (req, res, next) => {
     const existing = await ExamInvite.findOne({ exam: exam._id, email, status: { $ne: 'expired' } });
     if (existing) return next(new AppError('This email has already been invited', 409));
 
-    const invite = await ExamInvite.create({ exam: exam._id, invitedBy: req.user._id, email });
-    const inviteUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/exam/${exam._id}?invite=${invite.token}`;
+    const numVariants = exam.multipleSets && Array.isArray(exam.questionVariants) && exam.questionVariants.length > 0
+      ? exam.questionVariants.length
+      : 1;
+    const assignedVariantIndex = numVariants > 1 ? crypto.randomInt(0, numVariants) : 0;
+    const invite = await ExamInvite.create({
+      exam: exam._id,
+      invitedBy: req.user._id,
+      email,
+      assignedVariantIndex,
+    });
+    const clientBase = process.env.CLIENT_URL || 'http://localhost:5173';
+    const inviteUrl = `${clientBase}/exam/${exam._id}?invite=${invite.token}`;
+    const signupUrl = `${clientBase}/signup?invite=${invite.token}&email=${encodeURIComponent(email)}`;
 
     const settings = await getSettings();
     if (settings.emailInstructorInviteEnabled) {
@@ -81,6 +125,7 @@ export const sendInvite = async (req, res, next) => {
         examTitle: exam.title,
         examSubject: exam.subject,
         inviteUrl,
+        signupUrl,
         expiresAt: invite.expiresAt.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }),
       }).catch(logger.error);
     }
@@ -129,35 +174,95 @@ export const getInstructorAnalytics = async (req, res, next) => {
     const exams = await Exam.find({ createdBy: req.user._id }).sort({ createdAt: -1 });
     const examIds = exams.map(e => e._id);
 
-    const [inviteStats, resultStats] = await Promise.all([
+    const [inviteStats, inviteByExam, uniqueUserStats] = await Promise.all([
       ExamInvite.aggregate([
         { $match: { exam: { $in: examIds } } },
         { $group: { _id: '$status', count: { $sum: 1 } } }
       ]),
+      ExamInvite.aggregate([
+        { $match: { exam: { $in: examIds } } },
+        {
+          $group: {
+            _id: '$exam',
+            notAttempted: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ['$status', 'accepted'] },
+                      { $eq: [{ $ifNull: ['$result', null] }, null] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ]),
+      // One row per (exam, user): latest attempt only — summary counts unique learners, not every Result doc
       Result.aggregate([
         { $match: { exam: { $in: examIds } } },
-        { $group: { _id: '$exam', count: { $sum: 1 }, avgScore: { $avg: '$percentage' }, passCount: { $sum: { $cond: ['$passed', 1, 0] } } } }
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: { exam: '$exam', user: '$user' },
+            latestPassed: { $first: '$passed' },
+            latestPct: { $first: '$percentage' },
+          },
+        },
+        {
+          $group: {
+            _id: '$_id.exam',
+            uniqueAttempted: { $sum: 1 },
+            uniquePassed: { $sum: { $cond: ['$latestPassed', 1, 0] } },
+            avgLatestScore: { $avg: '$latestPct' },
+          },
+        },
       ]),
     ]);
 
     const inviteStatusMap = Object.fromEntries(inviteStats.map(i => [i._id, i.count]));
-    const resultMap = Object.fromEntries(resultStats.map(r => [r._id.toString(), r]));
+    const inviteExamMap = Object.fromEntries(inviteByExam.map(i => [i._id.toString(), i]));
+    const resultMap = Object.fromEntries(uniqueUserStats.map(r => {
+      const ua = r.uniqueAttempted || 0;
+      const up = r.uniquePassed || 0;
+      return [r._id.toString(), {
+        count: ua,
+        avgScore: r.avgLatestScore,
+        passCount: up,
+        failCount: Math.max(0, ua - up),
+      }];
+    }));
 
     const totalInvites = (inviteStatusMap.pending || 0) + (inviteStatusMap.accepted || 0) + (inviteStatusMap.expired || 0);
     const acceptedInvites = inviteStatusMap.accepted || 0;
-    const totalAttempts = resultStats.reduce((a, r) => a + r.count, 0);
-    const avgScore = resultStats.length ? Math.round(resultStats.reduce((a, r) => a + r.avgScore, 0) / resultStats.length) : 0;
+    const totalAttempts = uniqueUserStats.reduce((a, r) => a + (r.uniqueAttempted || 0), 0);
+    const examsWithAttempts = uniqueUserStats.filter(r => (r.uniqueAttempted || 0) > 0);
+    const avgScore = examsWithAttempts.length
+      ? Math.round(examsWithAttempts.reduce((s, r) => s + (r.avgLatestScore || 0), 0) / examsWithAttempts.length)
+      : 0;
 
-    const examsWithStats = exams.map(e => ({
-      _id: e._id, title: e.title, subject: e.subject,
-      difficulty: e.difficulty, timesAttempted: e.timesAttempted,
-      proctored: e.proctored, certificate: e.certificate,
-      allowReattempt: e.allowReattempt, showAnswersAfter: e.showAnswersAfter,
-      passingPercentage: e.passingPercentage, expiryDate: e.expiryDate,
-      questions: e.questions, questionCount: e.questions?.length || 0,
-      inviteCount: 0, acceptedCount: 0,
-      stats: resultMap[e._id.toString()] || { count: 0, avgScore: 0, passCount: 0 },
-    }));
+    const examsWithStats = exams.map(e => {
+      const inv = inviteExamMap[e._id.toString()] || {};
+      const st = resultMap[e._id.toString()] || { count: 0, avgScore: 0, passCount: 0, failCount: 0 };
+      return {
+        _id: e._id, title: e.title, subject: e.subject,
+        difficulty: e.difficulty, timesAttempted: e.timesAttempted,
+        proctored: e.proctored, certificate: e.certificate,
+        allowReattempt: e.allowReattempt, showAnswersAfter: e.showAnswersAfter,
+        passingPercentage: e.passingPercentage, expiryDate: e.expiryDate,
+        questions: e.questions, questionCount: e.questions?.length || 0,
+        stats: {
+          count: st.count,
+          avgScore: st.avgScore,
+          passCount: st.passCount || 0,
+          failCount: st.failCount ?? 0,
+          notAttempted: inv.notAttempted || 0,
+        },
+      };
+    });
 
     const payload = { totalExams: exams.length, totalInvites, acceptedInvites, totalAttempts, avgScore, exams: examsWithStats };
     await setCache(key, payload, 600);
@@ -328,22 +433,35 @@ export const sendGroupInvite = async (req, res, next) => {
 
     const emails = group.members.map(m => m.email);
     const settings = await getSettings();
-    const inviteUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/exam/${exam._id}`;
+    const clientBase = process.env.CLIENT_URL || 'http://localhost:5173';
+    const inviteUrlBase = `${clientBase}/exam/${exam._id}`;
+    const numVariants = exam.multipleSets && Array.isArray(exam.questionVariants) && exam.questionVariants.length > 0
+      ? exam.questionVariants.length
+      : 1;
 
     let sent = 0, skipped = 0;
     for (const email of emails) {
       const existing = await ExamInvite.findOne({ exam: exam._id, email, status: { $ne: 'expired' } });
       if (existing) { skipped++; continue; }
-      const invite = await ExamInvite.create({ exam: exam._id, invitedBy: req.user._id, email, group: groupId });
+      const assignedVariantIndex = numVariants > 1 ? crypto.randomInt(0, numVariants) : 0;
+      const invite = await ExamInvite.create({
+        exam: exam._id,
+        invitedBy: req.user._id,
+        email,
+        group: groupId,
+        assignedVariantIndex,
+      });
       sent++;
       if (settings.emailInstructorInviteEnabled) {
-        const member = group.members.find(m => m.email === email);
+        const perInviteUrl = `${inviteUrlBase}?invite=${invite.token}`;
+        const signupUrl = `${clientBase}/signup?invite=${invite.token}&email=${encodeURIComponent(email)}`;
         sendInstructorInviteEmail({
           email,
           instructorName: req.user.name,
           examTitle: exam.title,
           examSubject: exam.subject,
-          inviteUrl: `${inviteUrl}?invite=${invite.token}`,
+          inviteUrl: perInviteUrl,
+          signupUrl,
           expiresAt: invite.expiresAt.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }),
         }).catch(logger.error);
       }
@@ -372,6 +490,16 @@ export const acceptInvite = async (req, res, next) => {
 
     invite.status = 'accepted';
     await invite.save();
+
+    const title = invite.exam?.title || 'your test';
+    createNotificationsForUsers([req.user._id], {
+      type: 'exam_invite',
+      title: 'Test ready to take',
+      message: `You're enrolled for "${title}". Start it from My Tests when you're ready.`,
+      link: '/tests',
+      severity: 'info',
+      meta: { examId: invite.exam?._id?.toString(), inviteToken: invite.token },
+    }).catch(logger.error);
 
     res.json({ message: 'Invite accepted', exam: invite.exam });
   } catch (err) { next(err); }
@@ -451,118 +579,7 @@ export const getExamReport = async (req, res, next) => {
       return next(new AppError('Not authorized', 403));
     }
 
-    const invites = await ExamInvite.find({ exam: exam._id })
-      .populate({ path: 'result', select: 'score totalQuestions correctCount incorrectCount percentage passed timeTaken proctored violations topicAccuracy createdAt proctoringEvents' })
-      .sort({ createdAt: -1 });
-
-    // Fetch ALL results for this exam (covers both invite-based and batch-accessed students)
-    const allResults = await Result.find({ exam: exam._id })
-      .populate('user', 'name email')
-      .sort({ createdAt: 1 });
-
-    const resultsByUser = {};
-    allResults.forEach(r => {
-      if (!r.user) return;
-      const uid = r.user._id.toString();
-      if (!resultsByUser[uid]) resultsByUser[uid] = [];
-      resultsByUser[uid].push(r);
-    });
-
-    // Screenshot counts per user
-    const screenshotCounts = exam.screenshotEnabled
-      ? await Screenshot.aggregate([
-          { $match: { exam: exam._id } },
-          { $group: { _id: '$user', count: { $sum: 1 } } }
-        ])
-      : [];
-    const screenshotMap = Object.fromEntries(screenshotCounts.map(s => [s._id.toString(), s.count]));
-
-    // Build invite-email → user lookup
-    const inviteEmailSet = new Set(invites.map(inv => inv.email));
-    const inviteUsers = await User.find({ email: { $in: [...inviteEmailSet] } }).select('email name');
-    const inviteUserByEmail = Object.fromEntries(inviteUsers.map(u => [u.email, u]));
-
-    const buildRow = (email, name, uid, inv) => {
-      const userResults = uid ? (resultsByUser[uid] || []) : [];
-      const latestResult = userResults[userResults.length - 1] || null;
-      const bestResult = userResults.reduce((best, r) => (!best || r.percentage > best.percentage ? r : best), null);
-      return {
-        _id: inv?._id || uid,
-        userId: uid || null,
-        email,
-        name: name || null,
-        inviteStatus: inv?.status || 'batch',
-        invitedAt: inv?.createdAt || null,
-        reattemptCount: inv?.reattemptCount || 0,
-        totalAttempts: userResults.length,
-        screenshotCount: uid ? (screenshotMap[uid] || 0) : 0,
-        latestResult: latestResult ? {
-          resultId: latestResult._id,
-          score: latestResult.score,
-          totalQuestions: latestResult.totalQuestions,
-          correctCount: latestResult.correctCount,
-          incorrectCount: latestResult.incorrectCount,
-          percentage: latestResult.percentage,
-          passed: latestResult.passed,
-          timeTaken: latestResult.timeTaken,
-          proctored: latestResult.proctored,
-          violations: latestResult.violations,
-          attemptedAt: latestResult.createdAt,
-          topicAccuracy: latestResult.topicAccuracy ? Object.fromEntries(latestResult.topicAccuracy) : {},
-          proctoringEvents: Array.isArray(latestResult.proctoringEvents) ? latestResult.proctoringEvents : [],
-        } : null,
-        bestResult: bestResult ? {
-          percentage: bestResult.percentage,
-          passed: bestResult.passed,
-          attemptedAt: bestResult.createdAt,
-        } : null,
-        allAttempts: userResults.map(r => ({
-          resultId: r._id,
-          percentage: r.percentage,
-          passed: r.passed,
-          timeTaken: r.timeTaken,
-          violations: r.violations,
-          proctoringEvents: Array.isArray(r.proctoringEvents) ? r.proctoringEvents : [],
-          proctored: r.proctored,
-          attemptedAt: r.createdAt,
-        })),
-      };
-    };
-
-    // Rows for invited students
-    const rows = invites.map(inv => {
-      const userInfo = inviteUserByEmail[inv.email];
-      const uid = userInfo?._id?.toString();
-      return buildRow(inv.email, userInfo?.name, uid, inv);
-    });
-
-    // Add batch-only students (have results but no invite)
-    const invitedUserIds = new Set(
-      inviteUsers.map(u => u._id.toString())
-    );
-    const batchOnlyUsers = new Set();
-    allResults.forEach(r => {
-      if (!r.user) return;
-      const uid = r.user._id.toString();
-      if (!invitedUserIds.has(uid) && !batchOnlyUsers.has(uid)) {
-        batchOnlyUsers.add(uid);
-        rows.push(buildRow(r.user.email, r.user.name, uid, null));
-      }
-    });
-
-    const attempted = rows.filter(r => r.totalAttempts > 0);
-    const summary = {
-      totalInvites: invites.length,
-      accepted: invites.filter(i => i.status === 'accepted').length,
-      pending: invites.filter(i => i.status === 'pending').length,
-      totalParticipants: rows.length,
-      attempted: attempted.length,
-      passed: rows.filter(r => r.latestResult?.passed).length,
-      avgScore: attempted.length
-        ? Math.round(attempted.filter(r => r.latestResult).reduce((s, r) => s + r.latestResult.percentage, 0) / attempted.filter(r => r.latestResult).length || 0)
-        : 0,
-    };
-
+    const { rows, summary } = await buildInstructorExamReportData(exam);
     res.json({ exam, rows, summary });
   } catch (err) { next(err); }
 };
@@ -571,7 +588,9 @@ export const getExamReport = async (req, res, next) => {
 export const getStudentExamReport = async (req, res, next) => {
   try {
     const { examId, userId } = req.params;
-    const exam = await Exam.findById(examId).select('title subject difficulty proctored questions createdBy passingPercentage screenshotEnabled timePerQuestion');
+    const exam = await Exam.findById(examId).select(
+      'title subject difficulty proctored questions questionVariants multipleSets createdBy passingPercentage screenshotEnabled timePerQuestion',
+    );
     if (!exam) return next(new AppError('Exam not found', 404));
     if (exam.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return next(new AppError('Not authorized', 403));
@@ -583,6 +602,11 @@ export const getStudentExamReport = async (req, res, next) => {
     const results = await Result.find({ exam: exam._id, user: student._id }).sort({ createdAt: -1 }).lean();
     const latest = results[0] || null;
 
+    const shuffle = await UserExamShuffle.findOne({ user: student._id, exam: exam._id }).lean();
+    const variantIdx = shuffle?.variantIndex ?? 0;
+    const baseQs = getBaseQuestionsForExam(exam, variantIdx);
+    const questionsForReport = shuffle ? buildDisplayQuestions(baseQs, shuffle) : baseQs;
+
     const screenshots = exam.screenshotEnabled
       ? await Screenshot.find({ exam: exam._id, user: student._id })
           .populate('result', 'percentage passed violations createdAt')
@@ -591,15 +615,15 @@ export const getStudentExamReport = async (req, res, next) => {
           .lean()
       : [];
 
-    const topicAccuracy = latest?.topicAccuracy ? Object.fromEntries(Object.entries(latest.topicAccuracy)) : {};
+    const topicAccuracy = topicAccuracyToPlain(latest?.topicAccuracy);
     const weakTopics = Object.entries(topicAccuracy)
       .filter(([, v]) => typeof v === 'number' && v < 60)
       .sort((a, b) => a[1] - b[1])
       .slice(0, 5)
       .map(([k]) => k);
 
-    const answers = latest?.answers || [];
-    const questionCount = exam.questions?.length || 0;
+    const answers = normalizeAnswersArray(latest?.answers);
+    const questionCount = questionsForReport.length || exam.questions?.length || 0;
     const avgAITotal = answers.filter(a => typeof a.aiScore === 'number');
     const avgAIScore = avgAITotal.length
       ? Math.round(avgAITotal.reduce((s, a) => s + (a.aiScore || 0), 0) / avgAITotal.length)
@@ -619,8 +643,13 @@ export const getStudentExamReport = async (req, res, next) => {
       ],
     };
 
+    const examOut = {
+      ...exam.toObject(),
+      questions: questionsForReport,
+    };
+
     res.json({
-      exam,
+      exam: examOut,
       student,
       attempts: results.map(r => ({
         _id: r._id,
@@ -634,12 +663,13 @@ export const getStudentExamReport = async (req, res, next) => {
         proctored: r.proctored,
         violations: r.violations,
         proctoringEvents: Array.isArray(r.proctoringEvents) ? r.proctoringEvents : [],
-        topicAccuracy: r.topicAccuracy ? Object.fromEntries(r.topicAccuracy) : {},
+        topicAccuracy: topicAccuracyToPlain(r.topicAccuracy),
         createdAt: r.createdAt,
       })),
       latestResult: latest ? {
         ...latest,
-        topicAccuracy: latest.topicAccuracy ? Object.fromEntries(latest.topicAccuracy) : {},
+        answers: normalizeAnswersArray(latest.answers),
+        topicAccuracy: topicAccuracyToPlain(latest.topicAccuracy),
         totalQuestions: latest.totalQuestions || questionCount,
         proctoringEvents: Array.isArray(latest.proctoringEvents) ? latest.proctoringEvents : [],
       } : null,
@@ -649,6 +679,80 @@ export const getStudentExamReport = async (req, res, next) => {
         avgAIScore,
       },
       recommendation,
+    });
+  } catch (err) { next(err); }
+};
+
+// PATCH /api/instructor/results/:resultId/reevaluate
+export const reevaluateResult = async (req, res, next) => {
+  try {
+    const { resultId } = req.params;
+    const { overrides } = req.body;
+    if (!Array.isArray(overrides) || overrides.length === 0) {
+      return next(new AppError('overrides must be a non-empty array', 400));
+    }
+
+    const result = await Result.findById(resultId);
+    if (!result) return next(new AppError('Result not found', 404));
+
+    const exam = await Exam.findById(result.exam);
+    if (!exam) return next(new AppError('Exam not found', 404));
+    if (exam.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return next(new AppError('Not authorized', 403));
+    }
+
+    if (!Array.isArray(result.answers)) {
+      result.answers = normalizeAnswersArray(result.answers);
+      result.markModified('answers');
+    }
+
+    const shuffle = await UserExamShuffle.findOne({ user: result.user, exam: exam._id }).lean();
+    const baseQs = getBaseQuestionsForExam(exam, shuffle?.variantIndex ?? 0);
+    const questionsForScoring = shuffle ? buildDisplayQuestions(baseQs, shuffle) : (exam.questions || []);
+    const examForMetrics = { ...exam.toObject(), questions: questionsForScoring };
+
+    for (const o of overrides) {
+      if (o.questionIndex === undefined || o.questionIndex === null) continue;
+      const sub = result.answers.find(a => a.questionIndex === Number(o.questionIndex));
+      if (!sub) continue;
+      if (typeof o.isCorrect === 'boolean') sub.isCorrect = o.isCorrect;
+      if (typeof o.aiScore === 'number') sub.aiScore = Math.max(0, Math.min(100, Math.round(o.aiScore)));
+      if (typeof o.aiFeedback === 'string') sub.aiFeedback = o.aiFeedback.slice(0, 4000);
+    }
+
+    result.markModified('answers');
+    const answerPlain = result.answers.map(a => (typeof a.toObject === 'function' ? a.toObject() : a));
+    const m = computeResultMetrics(examForMetrics, answerPlain);
+    result.correctCount = m.correctCount;
+    result.incorrectCount = m.incorrectCount;
+    result.unattemptedCount = m.unattemptedCount;
+    result.percentage = m.percentage;
+    result.passed = m.passed;
+    result.score = m.score;
+    result.totalQuestions = m.totalQuestions;
+    result.topicAccuracy = m.topicAccuracy;
+    result.xpEarned = xpFromPercentage(m.percentage, exam.difficulty);
+
+    await result.save();
+
+    await delCache(
+      `analytics_detailed:${req.user._id}`,
+      `analytics:${req.user._id}`,
+      `instructor_exams:${req.user._id}`,
+      `exams:${exam.createdBy}`,
+    );
+
+    res.json({
+      message: 'Result updated',
+      result: {
+        _id: result._id,
+        percentage: result.percentage,
+        passed: result.passed,
+        correctCount: result.correctCount,
+        incorrectCount: result.incorrectCount,
+        unattemptedCount: result.unattemptedCount,
+        score: result.score,
+      },
     });
   } catch (err) { next(err); }
 };

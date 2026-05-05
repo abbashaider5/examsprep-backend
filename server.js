@@ -18,6 +18,7 @@ import { validateEnv } from './utils/validateEnv.js';
 validateEnv();
 
 import { connectDB } from './config/db.js';
+import { seedHelpTopicsIfEmpty } from './utils/seedHelpTopics.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import logger from './utils/logger.js';
 import { apiLimiter } from './middleware/rateLimiter.js';
@@ -41,6 +42,7 @@ import groupRoutes from './routes/groups.js';
 import notificationRoutes from './routes/notifications.js';
 import resourceRoutes from './routes/resources.js';
 import ticketRoutes from './routes/tickets.js';
+import helpRoutes from './routes/help.js';
 
 const app = express();
 
@@ -49,6 +51,9 @@ let mongoBootError = null;
 await connectDB().catch((e) => {
   mongoBootError = e;
 });
+if (!mongoBootError) {
+  await seedHelpTopicsIfEmpty().catch(() => {});
+}
 
 // If DB is down, fail fast (don't let Mongoose buffer requests indefinitely in dev)
 mongoose.set('bufferCommands', false);
@@ -146,6 +151,7 @@ app.use('/api/groups',        groupRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/resources',    resourceRoutes);
 app.use('/api/tickets', ticketRoutes);
+app.use('/api/help', helpRoutes);
 
 // Bare-path fallback (handles VITE_API_URL set without /api suffix)
 app.use(apiLimiter);
@@ -165,6 +171,7 @@ app.use('/contact', contactRoutes);
 app.use('/announcements', announcementRoutes);
 app.use('/groups', groupRoutes);
 app.use('/tickets', ticketRoutes);
+app.use('/help', helpRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
 app.get('/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));

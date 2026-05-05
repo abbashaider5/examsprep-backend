@@ -5,19 +5,29 @@ import Subscription from '../models/Subscription.js';
 import { getSettings } from '../models/SystemSettings.js';
 import Transaction from '../models/Transaction.js';
 import User from '../models/User.js';
+import crypto from 'crypto';
 import { log, fromReq } from '../utils/activityLogger.js';
-import { sendPlanChangeEmail } from '../services/emailService.js';
+import { sendAdminProvisionedAccountEmail, sendPlanChangeEmail } from '../services/emailService.js';
 
 export const getStats = async (req, res, next) => {
   try {
-    const [userCount, examCount, resultCount, passCount, instructorCount, now] = await Promise.all([
+    const [userCount, examCount, resultCount, passCount, instructorCount, adminCount, planAgg, now] = await Promise.all([
       User.countDocuments(),
       Exam.countDocuments(),
       Result.countDocuments(),
       Result.countDocuments({ passed: true }),
       User.countDocuments({ role: 'instructor' }),
+      User.countDocuments({ role: 'admin' }),
+      User.aggregate([{ $group: { _id: '$plan', count: { $sum: 1 } } }]),
       Promise.resolve(new Date()),
     ]);
+
+    const planMap = Object.fromEntries(planAgg.map(p => [p._id, p.count]));
+    const plans = {
+      free: planMap.free || 0,
+      pro: planMap.pro || 0,
+      enterprise: planMap.enterprise || 0,
+    };
 
     // Users last 7 days
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -53,9 +63,17 @@ export const getStats = async (req, res, next) => {
     ]);
 
     res.json({
-      users: userCount, instructors: instructorCount, exams: examCount, results: resultCount,
+      users: userCount,
+      instructors: instructorCount,
+      admins: adminCount,
+      exams: examCount,
+      results: resultCount,
       passRate: resultCount ? Math.round((passCount / resultCount) * 100) : 0,
-      userGrowth, examActivity, scoreDistribution, topSubjects,
+      plans,
+      userGrowth,
+      examActivity,
+      scoreDistribution,
+      topSubjects,
     });
   } catch (err) { next(err); }
 };
@@ -81,6 +99,57 @@ export const getUsers = async (req, res, next) => {
       return obj;
     });
     res.json({ users: usersWithStatus, total, page, pages: Math.ceil(total / limit) });
+  } catch (err) { next(err); }
+};
+
+export const createUser = async (req, res, next) => {
+  try {
+    const { name, email, password, role = 'user', notifyEmail = true } = req.body;
+    if (!name?.trim() || !email?.trim()) return next(new AppError('Name and email are required', 400));
+    if (!['user', 'instructor', 'admin'].includes(role)) return next(new AppError('Invalid role', 400));
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+    const exists = await User.findOne({ email: normalizedEmail });
+    if (exists) return next(new AppError('An account with this email already exists', 400));
+
+    const plainPassword = password && String(password).length >= 6
+      ? String(password)
+      : crypto.randomBytes(12).toString('base64url').slice(0, 16);
+
+    const user = await User.create({
+      name: name.trim(),
+      email: normalizedEmail,
+      password: plainPassword,
+      role,
+    });
+
+    const sendMail = notifyEmail !== false && notifyEmail !== 'false';
+    let emailDelivered = false;
+    if (sendMail) {
+      emailDelivered = await sendAdminProvisionedAccountEmail({
+        email: user.email,
+        name: user.name,
+        temporaryPassword: plainPassword,
+      });
+    }
+
+    await log({
+      user: req.user,
+      action: 'admin_user_created',
+      category: 'admin',
+      metadata: { targetEmail: user.email, role: user.role },
+      ...fromReq(req),
+    });
+
+    const safe = user.toObject({ virtuals: true });
+    delete safe.password;
+    res.status(201).json({
+      user: safe,
+      notifyEmailSent: sendMail && emailDelivered,
+      /** True when the admin asked to email but Resend did not accept the message (see server logs). */
+      emailSendFailed: sendMail && !emailDelivered,
+      ...(!sendMail || !emailDelivered ? { temporaryPassword: plainPassword } : {}),
+    });
   } catch (err) { next(err); }
 };
 

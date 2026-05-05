@@ -3,6 +3,7 @@ import Result from '../models/Result.js';
 import Resource from '../models/Resource.js';
 import User from '../models/User.js';
 import { generateRecommendation } from '../services/aiService.js';
+import { uploadProfileImage } from '../services/cloudinaryService.js';
 
 const RESOURCE_LIBRARY = [
   {
@@ -95,10 +96,42 @@ export const getProfile = async (req, res, next) => {
 
 export const updateProfile = async (req, res, next) => {
   try {
-    const allowed = ['name', 'avatar', 'isPublic', 'twoFactorEnabled'];
+    const allowed = ['name', 'avatar', 'isPublic', 'twoFactorEnabled', 'schoolName', 'address', 'autoRenew'];
     const updates = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
+
+    if (updates.name !== undefined && !String(updates.name).trim()) {
+      return next(new AppError('Name cannot be empty.', 400));
+    }
+    if (updates.schoolName !== undefined) {
+      updates.schoolName = String(updates.schoolName || '').trim();
+    }
+    if (updates.address && typeof updates.address === 'object') {
+      const address = {
+        country: String(updates.address.country || '').trim(),
+        state: String(updates.address.state || '').trim(),
+        city: String(updates.address.city || '').trim(),
+        zipCode: String(updates.address.zipCode || '').trim(),
+      };
+      if (address.zipCode && !/^[A-Za-z0-9\- ]{3,20}$/.test(address.zipCode)) {
+        return next(new AppError('Please enter a valid zip/postal code.', 400));
+      }
+      updates.address = address;
+    }
+
     const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true, runValidators: true }).select('-password');
     res.json({ user });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const uploadAvatar = async (req, res, next) => {
+  try {
+    if (!req.file) return next(new AppError('Profile image is required.', 400));
+    const url = await uploadProfileImage(req.file.buffer, req.file.mimetype, req.file.originalname);
+    if (!url) return next(new AppError('Failed to upload profile image. Please try again.', 503));
+    const user = await User.findByIdAndUpdate(req.user._id, { avatar: url }, { new: true }).select('-password');
+    res.json({ message: 'Profile image updated.', user, avatar: url });
   } catch (err) {
     next(err);
   }

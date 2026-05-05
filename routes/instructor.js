@@ -2,7 +2,7 @@ import express from 'express';
 import {
   acceptInvite, becomeInstructor, getDetailedAnalytics, getExamInvites, getExamReport,
   getExamScreenshots, getInstructorAnalytics, getMyAcceptedInvites, getStudentExamReport,
-  getMyExams, getMyPendingInvites, rejectInvite, sendGroupInvite, sendInvite, validateInviteToken,
+  getMyExams, getMyPendingInvites, reevaluateResult, rejectInvite, sendGroupInvite, sendInvite, validateInviteToken,
 } from '../controllers/instructorController.js';
 import { protect, requireInstructor } from '../middleware/auth.js';
 
@@ -29,5 +29,6 @@ router.get('/exams/:examId/screenshots', getExamScreenshots);
 router.get('/exams/:examId/students/:userId/report', getStudentExamReport);
 router.get('/analytics', getInstructorAnalytics);
 router.get('/analytics/detailed', getDetailedAnalytics);
+router.patch('/results/:resultId/reevaluate', reevaluateResult);
 
 export default router;

@@ -132,3 +132,29 @@ export const uploadTicketAttachment = async (buffer, mimetype, originalName = 'a
     return null;
   }
 };
+
+/**
+ * Upload user profile image from file buffer.
+ * Returns URL string or null.
+ */
+export const uploadProfileImage = async (buffer, mimetype, originalName = 'avatar') => {
+  if (!isCloudinaryConfigured() || !buffer) return null;
+  try {
+    const base64 = buffer.toString('base64');
+    const dataUri = `data:${mimetype || 'image/jpeg'};base64,${base64}`;
+    const result = await cloudinary.uploader.upload(dataUri, {
+      folder: 'examprep/avatars',
+      resource_type: 'image',
+      public_id: `${Date.now()}_${originalName.replace(/[^a-z0-9._-]/gi, '_')}`,
+      width: 512,
+      height: 512,
+      crop: 'fill',
+      gravity: 'face',
+      quality: 85,
+    });
+    return result.secure_url;
+  } catch (err) {
+    logger.error(`[Cloudinary] Profile image upload failed: ${err.message}`);
+    return null;
+  }
+};

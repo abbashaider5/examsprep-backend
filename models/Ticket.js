@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 
 export const TICKET_TYPES = [
   'Test Creation Issue',
@@ -16,6 +17,7 @@ export const TICKET_STATUSES = ['open', 'in_progress', 'resolved', 'closed'];
 const ticketSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    ticketId: { type: String, required: true, unique: true, index: true },
     title: { type: String, required: true, trim: true, maxlength: 140 },
     description: { type: String, required: true, trim: true, maxlength: 5000 },
     type: { type: String, enum: TICKET_TYPES, required: true, index: true },
@@ -32,5 +34,12 @@ const ticketSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+ticketSchema.pre('validate', function ticketIdGenerator(next) {
+  if (this.ticketId) return next();
+  const suffix = crypto.randomBytes(3).toString('hex').toUpperCase();
+  this.ticketId = `TKT-${Date.now().toString().slice(-6)}-${suffix}`;
+  next();
+});
 
 export default mongoose.model('Ticket', ticketSchema);

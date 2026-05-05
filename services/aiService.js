@@ -1,4 +1,5 @@
 import Groq from 'groq-sdk';
+import { parseAiJsonArray, parseAiJsonObject } from '../utils/aiJsonParse.js';
 
 let _groq = null;
 const getGroq = () => { if (!_groq) _groq = new Groq({ apiKey: process.env.GROQ_API_KEY }); return _groq; };
@@ -26,7 +27,8 @@ Rules:
 - Questions must be distinct — no two questions should test the same concept
 - Vary question types: recall, application, analysis, scenario-based
 - Explanation must be concise and educational
-- topic field: short label (2-4 words)`;
+- topic field: short label (2-4 words)
+- Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
 
   const completion = await getGroq().chat.completions.create({
     model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
@@ -36,10 +38,12 @@ Rules:
   });
 
   const text = completion.choices[0]?.message?.content?.trim();
-  const jsonMatch = text.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) throw new Error('AI failed to return valid JSON for MCQ questions');
-
-  const questions = JSON.parse(jsonMatch[0]);
+  let questions;
+  try {
+    questions = parseAiJsonArray(text);
+  } catch {
+    throw new Error('AI failed to return valid JSON for MCQ questions');
+  }
   if (!Array.isArray(questions) || questions.length === 0) throw new Error('No questions generated');
 
   return questions.map(q => ({
@@ -75,7 +79,8 @@ Rules:
 - Each problem must be genuinely different
 - starterCode must be a valid function skeleton in the specified language
 - sampleSolution must be a real working solution
-- question must include at least one example (input → output)`;
+- question must include at least one example (input → output)
+- Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
 
   const completion = await getGroq().chat.completions.create({
     model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
@@ -85,10 +90,12 @@ Rules:
   });
 
   const text = completion.choices[0]?.message?.content?.trim();
-  const jsonMatch = text.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) throw new Error('AI failed to return valid JSON for coding questions');
-
-  const questions = JSON.parse(jsonMatch[0]);
+  let questions;
+  try {
+    questions = parseAiJsonArray(text);
+  } catch {
+    throw new Error('AI failed to return valid JSON for coding questions');
+  }
   if (!Array.isArray(questions) || questions.length === 0) throw new Error('No coding questions generated');
 
   return questions.map(q => ({
@@ -152,9 +159,12 @@ Respond ONLY with valid JSON (no other text):
       max_tokens: 300,
     });
     const text = completion.choices[0]?.message?.content?.trim();
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { isCorrect: false, score: 0, feedback: 'Evaluation could not be completed.' };
-    const result = JSON.parse(jsonMatch[0]);
+    let result;
+    try {
+      result = parseAiJsonObject(text);
+    } catch {
+      return { isCorrect: false, score: 0, feedback: 'Evaluation could not be completed.' };
+    }
     const score = Math.max(0, Math.min(100, Number(result.score) || 0));
     return { score, isCorrect: score >= 60, feedback: result.feedback || '' };
   } catch {
@@ -186,7 +196,8 @@ Rules:
 - Each question must test a different concept
 - modelAnswer should be a complete, well-structured response
 - keyPoints: 2-4 essential concepts that a good answer should include
-- Vary question types: explain, compare, analyze, evaluate, describe`;
+- Vary question types: explain, compare, analyze, evaluate, describe
+- Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
 
   const completion = await getGroq().chat.completions.create({
     model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
@@ -196,10 +207,12 @@ Rules:
   });
 
   const text = completion.choices[0]?.message?.content?.trim();
-  const jsonMatch = text.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) throw new Error('AI failed to return valid JSON for descriptive questions');
-
-  const questions = JSON.parse(jsonMatch[0]);
+  let questions;
+  try {
+    questions = parseAiJsonArray(text);
+  } catch {
+    throw new Error('AI failed to return valid JSON for descriptive questions');
+  }
   if (!Array.isArray(questions) || questions.length === 0) throw new Error('No questions generated');
 
   return questions.map(q => ({
@@ -215,13 +228,21 @@ Rules:
 };
 
 /** Generate questions from uploaded content text (PDF/doc) */
-export const generateQuestionsFromText = async ({ text, numQuestions, examType = 'mcq', difficulty = 'medium' }) => {
+export const generateQuestionsFromText = async ({
+  text, numQuestions, examType = 'mcq', difficulty = 'medium', mixedMcqPercent = 50,
+}) => {
   const truncated = text.slice(0, 8000); // limit context to avoid token overflow
   const seed = Math.floor(Math.random() * 10000);
 
   if (examType === 'descriptive' || examType === 'mixed') {
-    const descCount = examType === 'mixed' ? Math.ceil(numQuestions / 2) : numQuestions;
-    const mcqCount = examType === 'mixed' ? numQuestions - descCount : 0;
+    let pct = Number(mixedMcqPercent);
+    if (!Number.isFinite(pct)) pct = 50;
+    pct = Math.max(10, Math.min(90, Math.round(pct)));
+    let mcqCount = examType === 'mixed'
+      ? (numQuestions <= 1 ? (pct >= 50 ? 1 : 0) : Math.max(1, Math.min(numQuestions - 1, Math.round((numQuestions * pct) / 100))))
+      : 0;
+    let descCount = examType === 'mixed' ? numQuestions - mcqCount : numQuestions;
+    if (examType === 'mixed' && numQuestions <= 1) descCount = numQuestions - mcqCount;
     const [desc, mcqs] = await Promise.all([
       descCount > 0 ? generateDescriptiveQuestions({ subject: 'uploaded content', difficulty, numQuestions: descCount, topics: [], contextText: truncated }) : Promise.resolve([]),
       mcqCount > 0 ? generateMCQsFromText({ text: truncated, numQuestions: mcqCount, difficulty, seed }) : Promise.resolve([]),
@@ -255,7 +276,8 @@ Rules:
 - ONLY use information from the provided content
 - correctAnswer is 0-based index (0=A, 1=B, 2=C, 3=D)
 - All 4 options must be plausible
-- Difficulty: ${difficulty}`;
+- Difficulty: ${difficulty}
+- Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
 
   const completion = await getGroq().chat.completions.create({
     model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
@@ -265,9 +287,12 @@ Rules:
   });
 
   const t = completion.choices[0]?.message?.content?.trim();
-  const match = t.match(/\[[\s\S]*\]/);
-  if (!match) throw new Error('AI failed to generate questions from content');
-  const qs = JSON.parse(match[0]);
+  let qs;
+  try {
+    qs = parseAiJsonArray(t);
+  } catch {
+    throw new Error('AI failed to generate questions from content');
+  }
   return qs.map(q => ({
     type: 'mcq',
     question: q.question,
@@ -306,7 +331,9 @@ Return ONLY a single JSON object (not an array):
   "correctAnswer": 0,
   "explanation": "...",
   "topic": "..."
-}`;
+}
+
+Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value.`;
 
   const completion = await getGroq().chat.completions.create({
     model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
@@ -316,9 +343,12 @@ Return ONLY a single JSON object (not an array):
   });
 
   const text = completion.choices[0]?.message?.content?.trim();
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('AI failed to generate replacement question');
-  const q = JSON.parse(jsonMatch[0]);
+  let q;
+  try {
+    q = parseAiJsonObject(text);
+  } catch {
+    throw new Error('AI failed to generate replacement question');
+  }
   return {
     type: 'mcq',
     question: q.question,
@@ -365,9 +395,12 @@ Respond ONLY with valid JSON:
       max_tokens: 200,
     });
     const text = completion.choices[0]?.message?.content?.trim();
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { isCorrect: false, score: 0, feedback: 'Evaluation unavailable.' };
-    const result = JSON.parse(jsonMatch[0]);
+    let result;
+    try {
+      result = parseAiJsonObject(text);
+    } catch {
+      return { isCorrect: false, score: 0, feedback: 'Evaluation unavailable.' };
+    }
     const score = Math.max(0, Math.min(100, Number(result.score) || 0));
     return { score, isCorrect: score >= 50, feedback: result.feedback || '' };
   } catch {
@@ -396,9 +429,11 @@ Return JSON: {"topic": "...", "difficulty": "...", "tip": "..."}`;
   });
 
   const text = completion.choices[0]?.message?.content?.trim();
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) return null;
-  return JSON.parse(jsonMatch[0]);
+  try {
+    return parseAiJsonObject(text);
+  } catch {
+    return null;
+  }
 };
 
 // ── AI Proctoring: analyze a webcam frame for violations ───────────────────
@@ -442,10 +477,12 @@ Rules:
     });
 
     const raw = response.choices[0]?.message?.content?.trim() || '';
-    const jsonMatch = raw.match(/\{[\s\S]*?\}/);
-    if (!jsonMatch) return null;
-
-    const result = JSON.parse(jsonMatch[0]);
+    let result;
+    try {
+      result = parseAiJsonObject(raw);
+    } catch {
+      return null;
+    }
     return {
       faceCount:     typeof result.faceCount === 'number' ? result.faceCount : 1,
       phoneDetected: !!result.phoneDetected,

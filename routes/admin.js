@@ -1,7 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import {
-  deleteUser, getAdminSubscriptions, getAdminTransactions,
+  createUser, deleteUser, getAdminSubscriptions, getAdminTransactions,
   getPublicExams, getStats, getUsers, toggleBlockUser,
   updateUserPlan, updateUserRole,
 } from '../controllers/adminController.js';
@@ -12,6 +12,12 @@ import {
   updateContactStatus,
 } from '../controllers/contactController.js';
 import { adminListResources, deleteResource, uploadResource } from '../controllers/resourceController.js';
+import {
+  createHelpTopic,
+  deleteHelpTopic,
+  listHelpTopicsAdmin,
+  updateHelpTopic,
+} from '../controllers/helpTopicController.js';
 import { protect, requireAdmin } from '../middleware/auth.js';
 
 const upload = multer({
@@ -28,6 +34,7 @@ const router = express.Router();
 router.use(protect, requireAdmin);
 router.get('/stats', getStats);
 router.get('/users', getUsers);
+router.post('/users', createUser);
 router.patch('/users/:id/role', updateUserRole);
 router.patch('/users/:id/block', toggleBlockUser);
 router.patch('/users/:id/plan', updateUserPlan);
@@ -46,6 +53,12 @@ router.delete('/contacts/:id', deleteContact);
 router.get('/resources', adminListResources);
 router.post('/resources', upload.single('file'), uploadResource);
 router.delete('/resources/:id', deleteResource);
+
+// Help center articles (CRUD)
+router.get('/help/topics', listHelpTopicsAdmin);
+router.post('/help/topics', createHelpTopic);
+router.put('/help/topics/:topicId', updateHelpTopic);
+router.delete('/help/topics/:topicId', deleteHelpTopic);
 
 export default router;
 

@@ -6,6 +6,8 @@ const examInviteSchema = new mongoose.Schema({
   invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', default: null },
   email: { type: String, required: true, lowercase: true, trim: true },
+  /** For multipleSets exams: which variant (0..2) this student is assigned */
+  assignedVariantIndex: { type: Number, default: null, min: 0, max: 9 },
   token: { type: String, unique: true, default: () => crypto.randomBytes(32).toString('hex') },
   status: { type: String, enum: ['pending', 'accepted', 'expired'], default: 'pending' },
   result: { type: mongoose.Schema.Types.ObjectId, ref: 'Result', default: null },

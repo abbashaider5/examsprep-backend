@@ -21,6 +21,22 @@ export const protect = async (req, res, next) => {
   }
 };
 
+/** Sets req.user when a valid session exists; otherwise req.user is null (no error). */
+export const optionalProtect = async (req, res, next) => {
+  req.user = null;
+  try {
+    const token = req.cookies?.accessToken || req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return next();
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).select('_id role isBlocked');
+    if (!user || user.isBlocked) return next();
+    req.user = user;
+    next();
+  } catch {
+    next();
+  }
+};
+
 export const requireAdmin = (req, res, next) => {
   if (req.user?.role !== 'admin') {
     return res.status(403).json({ message: 'Access denied. Admin only.' });

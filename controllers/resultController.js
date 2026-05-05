@@ -3,6 +3,8 @@ import Certificate from '../models/Certificate.js';
 import Exam from '../models/Exam.js';
 import ExamInvite from '../models/ExamInvite.js';
 import Result from '../models/Result.js';
+import UserExamShuffle from '../models/UserExamShuffle.js';
+import { buildDisplayQuestions, getBaseQuestionsForExam } from '../utils/examShuffleRuntime.js';
 import Screenshot from '../models/Screenshot.js';
 import User from '../models/User.js';
 import { getSettings } from '../models/SystemSettings.js';
@@ -44,6 +46,12 @@ export const submitResult = async (req, res, next) => {
     const exam = await Exam.findById(examId);
     if (!exam) return next(new AppError('Exam not found', 404));
 
+    const shuffle = await UserExamShuffle.findOne({ user: req.user._id, exam: exam._id });
+    const baseQs = getBaseQuestionsForExam(exam, shuffle?.variantIndex ?? 0);
+    const questionsForScoring = shuffle
+      ? buildDisplayQuestions(baseQs, shuffle)
+      : exam.questions;
+
     // Check expiry (skip for owner and admin)
     const isOwner = exam.createdBy.toString() === req.user._id.toString();
     if (!isOwner && req.user.role !== 'admin' && exam.expiryDate && new Date(exam.expiryDate) < new Date()) {
@@ -65,8 +73,8 @@ export const submitResult = async (req, res, next) => {
       : [];
 
     const passThreshold = exam.passingPercentage ?? 75;
-    const hasCodingQuestions = exam.questions.some(q => q.type === 'coding');
-    const hasDescriptiveQuestions = exam.questions.some(q => q.type === 'descriptive');
+    const hasCodingQuestions = questionsForScoring.some(q => q.type === 'coding');
+    const hasDescriptiveQuestions = questionsForScoring.some(q => q.type === 'descriptive');
 
     // Score MCQ answers immediately; collect coding/descriptive answers for AI eval
     let correctCount = 0;
@@ -76,7 +84,7 @@ export const submitResult = async (req, res, next) => {
     const pendingDescriptiveEvals = [];
 
     const scoredAnswers = answers.map(a => {
-      const q = exam.questions[a.questionIndex];
+      const q = questionsForScoring[a.questionIndex];
       if (!q) return { ...a, isCorrect: false };
 
       const t = q.topic || 'General';
@@ -118,7 +126,7 @@ export const submitResult = async (req, res, next) => {
       evalResults.forEach((evalResult, i) => {
         const { index } = pendingCodingEvals[i];
         const scored = scoredAnswers.find(a => a.questionIndex === index);
-        const q = exam.questions[index];
+        const q = questionsForScoring[index];
         const t = q.topic || 'General';
 
         if (scored) {
@@ -150,7 +158,7 @@ export const submitResult = async (req, res, next) => {
       evalResults.forEach((evalResult, i) => {
         const { index } = pendingDescriptiveEvals[i];
         const scored = scoredAnswers.find(a => a.questionIndex === index);
-        const q = exam.questions[index];
+        const q = questionsForScoring[index];
         const t = q.topic || 'General';
 
         if (scored) {
@@ -165,7 +173,7 @@ export const submitResult = async (req, res, next) => {
       });
     }
 
-    const total = exam.questions.length;
+    const total = questionsForScoring.length;
     const incorrectCount = total - correctCount - unattemptedCount;
     const percentage = Math.round((correctCount / total) * 100);
     const passed = percentage >= passThreshold;
@@ -251,7 +259,7 @@ export const submitResult = async (req, res, next) => {
     if (settings.gamificationEnabled) { user.xp += xpEarned; user.updateLevel(); }
     user.totalExams += 1;
     user.totalScore += percentage;
-    const weakTopics = detectWeakTopics(scoredAnswers, exam.questions);
+    const weakTopics = detectWeakTopics(scoredAnswers, questionsForScoring);
     if (weakTopics.length) {
       user.weakTopics = [...new Set([...user.weakTopics, ...weakTopics])].slice(-10);
     }
@@ -270,6 +278,7 @@ export const submitResult = async (req, res, next) => {
       `results:${req.user._id}`,
       `analytics:${exam.createdBy}`,
       `analytics_detailed:${exam.createdBy}`,
+      `exams:${exam.createdBy}`,
     );
 
     await log({
@@ -336,7 +345,7 @@ export const submitResult = async (req, res, next) => {
         showAnswersToUser: exam.showAnswersToUser  !== false,
         ...(exam.showAnswersToUser !== false && {
           answers: scoredAnswers,
-          questions: exam.questions,
+          questions: questionsForScoring,
         }),
       },
     });
