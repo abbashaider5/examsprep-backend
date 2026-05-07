@@ -1,17 +1,17 @@
 import express from 'express';
 import multer from 'multer';
 import {
-    deleteResource,
-    getAdminResources, getGroupResources,
-    getMyResources,
-    getResourceText,
-    uploadResource,
+  deleteResource,
+  getAdminResources, getGroupResources,
+  getMyResources,
+  getResourceText,
+  uploadResource,
 } from '../controllers/resourceController.js';
 import { protect } from '../middleware/auth.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
   fileFilter: (_, file, cb) => {
     const allowed = [
       'application/pdf',

@@ -63,17 +63,28 @@ mongoose.set('bufferTimeoutMS', 1000);
 // ── CORS — supports both production and local dev ────────────────────────────
 const allowedOrigins = [
   process.env.CLIENT_URL,
+  'https://likhitai.com',
+  'https://www.likhitai.com',
   'https://exams.abbaslogic.com',
   'http://localhost:5173',
   'http://localhost:3000',
   'http://localhost:4173',
 ].filter(Boolean);
 
+const normalizeOrigin = (value) => {
+  if (!value) return '';
+  return value.endsWith('/') ? value.slice(0, -1) : value;
+};
+
+const staticAllowedOrigins = new Set(allowedOrigins.map(normalizeOrigin));
+
 const corsOptions = {
   origin: (origin, callback) => {
     // Allow requests with no origin (server-to-server, mobile apps, curl)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
+    const normalizedOrigin = normalizeOrigin(origin);
+    const isLikhitAIDomain = /^https:\/\/([a-z0-9-]+\.)*likhitai\.com$/i.test(normalizedOrigin);
+    if (staticAllowedOrigins.has(normalizedOrigin) || isLikhitAIDomain) return callback(null, true);
     callback(new Error(`CORS: origin "${origin}" not allowed`));
   },
   credentials: true,
