@@ -4,6 +4,7 @@ const activityLogSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   userEmail: String,
   userName: String,
+  enterprise: { type: mongoose.Schema.Types.ObjectId, ref: 'Enterprise', default: null, index: true },
   action: {
     type: String,
     required: true,
@@ -16,11 +17,14 @@ const activityLogSchema = new mongoose.Schema({
       'admin_user_blocked', 'admin_user_unblocked', 'admin_user_deleted',
       'admin_role_changed', 'admin_settings_updated', 'admin_exam_deleted',
       'proctoring_violation', 'proctoring_terminated',
+      'enterprise_created', 'enterprise_teacher_invited', 'enterprise_teacher_removed',
+      'enterprise_impersonation_started', 'enterprise_impersonation_ended',
+      'enterprise_teacher_joined',
     ],
   },
   category: {
     type: String,
-    enum: ['auth', 'exam', 'certificate', 'profile', 'admin', 'proctoring'],
+    enum: ['auth', 'exam', 'certificate', 'profile', 'admin', 'proctoring', 'enterprise'],
     required: true,
   },
   metadata: { type: mongoose.Schema.Types.Mixed, default: {} },

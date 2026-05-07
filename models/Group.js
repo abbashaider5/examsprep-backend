@@ -8,6 +8,8 @@ const sharedExamSchema = new mongoose.Schema({
 const groupSchema = new mongoose.Schema({
   name:        { type: String, required: true, trim: true, maxlength: 80 },
   description: { type: String, trim: true, maxlength: 300, default: '' },
+  /** When set, batch belongs to an enterprise (institute mode). */
+  enterpriseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Enterprise', default: null, index: true },
   instructor:  { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   members:     [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   sharedExams: [sharedExamSchema],

@@ -106,7 +106,7 @@ export const createUser = async (req, res, next) => {
   try {
     const { name, email, password, role = 'user', notifyEmail = true } = req.body;
     if (!name?.trim() || !email?.trim()) return next(new AppError('Name and email are required', 400));
-    if (!['user', 'instructor', 'admin'].includes(role)) return next(new AppError('Invalid role', 400));
+    if (!['user', 'instructor', 'admin', 'principal'].includes(role)) return next(new AppError('Invalid role', 400));
 
     const normalizedEmail = String(email).toLowerCase().trim();
     const exists = await User.findOne({ email: normalizedEmail });
@@ -155,7 +155,7 @@ export const createUser = async (req, res, next) => {
 
 export const updateUserRole = async (req, res, next) => {
   try {
-    if (!['user', 'instructor', 'admin'].includes(req.body.role)) return next(new AppError('Invalid role', 400));
+    if (!['user', 'instructor', 'admin', 'principal'].includes(req.body.role)) return next(new AppError('Invalid role', 400));
     const user = await User.findByIdAndUpdate(req.params.id, { role: req.body.role }, { new: true }).select('-password');
     if (!user) return next(new AppError('User not found', 404));
     await log({ user: req.user, action: 'admin_role_changed', category: 'admin', metadata: { targetUserId: req.params.id, newRole: req.body.role }, ...fromReq(req) });
@@ -222,7 +222,7 @@ export const getAdminSubscriptions = async (req, res, next) => {
 export const updateUserPlan = async (req, res, next) => {
   try {
     const { plan, months = 1 } = req.body;
-    if (!['free', 'pro', 'enterprise'].includes(plan)) return next(new AppError('Invalid plan', 400));
+    if (!['free', 'pro'].includes(plan)) return next(new AppError('Invalid plan', 400));
 
     const user = await User.findById(req.params.id);
     if (!user) return next(new AppError('User not found', 404));

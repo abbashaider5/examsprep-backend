@@ -8,15 +8,18 @@ export const log = async ({
   action,
   category,
   metadata = {},
+  enterprise = null,
   ip = '',
   userAgent = '',
   severity = 'info',
 }) => {
   try {
+    const entId = enterprise?._id || enterprise || metadata?.enterpriseId || null;
     await ActivityLog.create({
       user: user?._id || user || null,
       userEmail: email || user?.email || '',
       userName: name || user?.name || '',
+      enterprise: entId || undefined,
       action,
       category,
       metadata,

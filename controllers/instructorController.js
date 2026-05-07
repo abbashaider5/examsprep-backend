@@ -5,11 +5,13 @@ import ExamInvite from '../models/ExamInvite.js';
 import Group from '../models/Group.js';
 import Result from '../models/Result.js';
 import Screenshot from '../models/Screenshot.js';
+import SchoolClass from '../models/SchoolClass.js';
 import User from '../models/User.js';
 import UserExamShuffle from '../models/UserExamShuffle.js';
 import { buildInstructorExamReportData } from '../utils/instructorExamReportData.js';
 import { buildDisplayQuestions, getBaseQuestionsForExam } from '../utils/examShuffleRuntime.js';
 import { getSettings } from '../models/SystemSettings.js';
+import Enterprise from '../models/Enterprise.js';
 import { sendInstructorInviteEmail } from '../services/emailService.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
 import { fromReq, log } from '../utils/activityLogger.js';
@@ -42,6 +44,12 @@ function topicAccuracyToPlain(ta) {
 const xpFromPercentage = (percentage, difficulty) => {
   const base = { easy: 10, medium: 20, hard: 35 };
   return Math.round((base[difficulty] || 10) * (percentage / 100));
+};
+
+const isEnterpriseSchoolInstructor = async (user) => {
+  if (user?.role !== 'instructor' || !user?.enterpriseId) return false;
+  const ent = await Enterprise.findById(user.enterpriseId).select('mode').lean();
+  return ent?.mode === 'school';
 };
 
 // POST /api/instructor/become
@@ -94,6 +102,9 @@ export const getMyExams = async (req, res, next) => {
 // POST /api/instructor/exams/:examId/invite
 export const sendInvite = async (req, res, next) => {
   try {
+    if (await isEnterpriseSchoolInstructor(req.user)) {
+      return next(new AppError('For enterprise school teachers, invite by class only.', 403));
+    }
     const { email } = req.body;
     if (!email) return next(new AppError('Email is required', 400));
 
@@ -141,6 +152,7 @@ export const getExamInvites = async (req, res, next) => {
     if (!exam) return next(new AppError('Exam not found or unauthorized', 404));
 
     const invites = await ExamInvite.find({ exam: req.params.examId })
+      .populate('classId', 'name section')
       .populate('result', 'percentage score passed timeTaken createdAt')
       .sort({ createdAt: -1 });
 
@@ -282,7 +294,7 @@ export const getDetailedAnalytics = async (req, res, next) => {
 
     // All results for instructor's exams with user info
     const results = await Result.find({ exam: { $in: examIds } })
-      .populate('user', 'name email')
+      .populate('user', 'name email schoolClassId')
       .sort({ createdAt: -1 })
       .lean();
 
@@ -346,7 +358,7 @@ export const getDetailedAnalytics = async (req, res, next) => {
       if (!uid) continue;
       if (!studentMap[uid]) {
         studentMap[uid] = {
-          user:     { _id: r.user._id, name: r.user.name, email: r.user.email },
+          user:     { _id: r.user._id, name: r.user.name, email: r.user.email, schoolClassId: r.user.schoolClassId || null },
           attempts: 0, totalScore: 0, passCount: 0, exams: [],
         };
       }
@@ -398,6 +410,37 @@ export const getDetailedAnalytics = async (req, res, next) => {
       };
     });
 
+    // Class-wise performance for enterprise school instructors
+    let classPerformance = [];
+    if (req.user.enterpriseId) {
+      const ent = await Enterprise.findById(req.user.enterpriseId).select('mode').lean();
+      if (ent?.mode === 'school') {
+        const classes = await SchoolClass.find({ enterprise: req.user.enterpriseId }).lean();
+        classPerformance = classes.map((c) => {
+          const classStudents = studentPerformance.filter(
+            (s) => s.user?.schoolClassId?.toString?.() === c._id.toString(),
+          );
+          const totalAttemptsByClass = classStudents.reduce((a, s) => a + (s.attempts || 0), 0);
+          const avgScoreByClass = classStudents.length
+            ? Math.round(classStudents.reduce((a, s) => a + (s.avgScore || 0), 0) / classStudents.length)
+            : 0;
+          const passRateByClass = classStudents.length
+            ? Math.round(classStudents.reduce((a, s) => a + (s.passRate || 0), 0) / classStudents.length)
+            : 0;
+          return {
+            _id: c._id,
+            name: c.name,
+            section: c.section || '',
+            studentCount: classStudents.length,
+            totalAttempts: totalAttemptsByClass,
+            avgScore: avgScoreByClass,
+            passRate: passRateByClass,
+            students: classStudents,
+          };
+        });
+      }
+    }
+
     const payload = {
       summary: {
         totalExams:    exams.length,
@@ -411,6 +454,7 @@ export const getDetailedAnalytics = async (req, res, next) => {
       subjectBreakdown,
       studentPerformance,
       groupPerformance,
+      classPerformance,
     };
     await setCache(key, payload, 600);
     res.json(payload);
@@ -419,6 +463,9 @@ export const getDetailedAnalytics = async (req, res, next) => {
 
 export const sendGroupInvite = async (req, res, next) => {
   try {
+    if (await isEnterpriseSchoolInstructor(req.user)) {
+      return next(new AppError('For enterprise school teachers, invite by class only.', 403));
+    }
     const { groupId } = req.body;
     if (!groupId) return next(new AppError('groupId is required', 400));
 
@@ -468,6 +515,83 @@ export const sendGroupInvite = async (req, res, next) => {
     }
 
     res.json({ message: `Invites sent to ${sent} member${sent !== 1 ? 's' : ''}. ${skipped} already invited.`, sent, skipped });
+  } catch (err) { next(err); }
+};
+
+export const sendClassInvite = async (req, res, next) => {
+  try {
+    if (!(await isEnterpriseSchoolInstructor(req.user))) {
+      return next(new AppError('Class invite is available for enterprise school teachers only.', 403));
+    }
+
+    const classIds = Array.isArray(req.body.classIds)
+      ? req.body.classIds.filter(Boolean)
+      : (req.body.classId ? [req.body.classId] : []);
+    if (!classIds.length) return next(new AppError('At least one class is required', 400));
+
+    const exam = await Exam.findOne({ _id: req.params.examId, createdBy: req.user._id });
+    if (!exam) return next(new AppError('Exam not found or unauthorized', 404));
+
+    const classes = await SchoolClass.find({
+      _id: { $in: classIds },
+      enterprise: req.user.enterpriseId,
+    }).select('name section').lean();
+    if (!classes.length) return next(new AppError('Class not found', 404));
+    const classIdSet = new Set(classes.map((c) => c._id.toString()));
+    const validClassIds = classIds.filter((id) => classIdSet.has(id.toString()));
+    if (!validClassIds.length) return next(new AppError('Class not found', 404));
+
+    const students = await User.find({
+      enterpriseId: req.user.enterpriseId,
+      role: 'user',
+      schoolClassId: { $in: validClassIds },
+    }).select('email name schoolClassId');
+    if (!students.length) {
+      return next(new AppError('No students found in this class', 400));
+    }
+
+    const settings = await getSettings();
+    const clientBase = process.env.CLIENT_URL || 'http://localhost:5173';
+    const inviteUrlBase = `${clientBase}/exam/${exam._id}`;
+    const numVariants = exam.multipleSets && Array.isArray(exam.questionVariants) && exam.questionVariants.length > 0
+      ? exam.questionVariants.length
+      : 1;
+
+    let sent = 0; let skipped = 0;
+    for (const st of students) {
+      const email = st.email?.toLowerCase();
+      if (!email) continue;
+      const existing = await ExamInvite.findOne({ exam: exam._id, email, status: { $ne: 'expired' } });
+      if (existing) { skipped++; continue; }
+      const assignedVariantIndex = numVariants > 1 ? crypto.randomInt(0, numVariants) : 0;
+      const invite = await ExamInvite.create({
+        exam: exam._id,
+        invitedBy: req.user._id,
+        email,
+        classId: validClassIds.find((cid) => cid.toString() === st.schoolClassId?.toString()) || null,
+        assignedVariantIndex,
+      });
+      sent++;
+      if (settings.emailInstructorInviteEnabled) {
+        const perInviteUrl = `${inviteUrlBase}?invite=${invite.token}`;
+        const signupUrl = `${clientBase}/signup?invite=${invite.token}&email=${encodeURIComponent(email)}`;
+        sendInstructorInviteEmail({
+          email,
+          instructorName: req.user.name,
+          examTitle: exam.title,
+          examSubject: exam.subject,
+          inviteUrl: perInviteUrl,
+          signupUrl,
+          expiresAt: invite.expiresAt.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }),
+        }).catch(logger.error);
+      }
+    }
+
+    res.json({
+      message: `Invites sent to ${sent} student${sent !== 1 ? 's' : ''} across ${classes.length} class${classes.length !== 1 ? 'es' : ''}. ${skipped} already invited.`,
+      sent,
+      skipped,
+    });
   } catch (err) { next(err); }
 };
 export const acceptInvite = async (req, res, next) => {

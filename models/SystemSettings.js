@@ -51,8 +51,13 @@ const systemSettingsSchema = new mongoose.Schema({
   certFooterText: { type: String, default: '' },
 
   // Plan Pricing (in paise)
-  planPricePro:        { type: Number, default: 14900 },
-  planPriceEnterprise: { type: Number, default: 34900 },
+  planPricePro: { type: Number, default: 14900 },
+
+  // Enterprise pricing configuration (in paise)
+  enterpriseCostPerTeacher: { type: Number, default: 2000 },
+  enterpriseCostPerExam: { type: Number, default: 300 },
+  enterpriseCostPerQuestion: { type: Number, default: 20 },
+  enterpriseCostAiProctoring: { type: Number, default: 5000 },
 
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });

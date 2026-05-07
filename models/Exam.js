@@ -28,6 +28,7 @@ const questionSchema = new mongoose.Schema({
 const examSchema = new mongoose.Schema({
   title:      { type: String, required: true, trim: true },
   subject:    { type: String, required: true, trim: true },
+  enterpriseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Enterprise', default: null, index: true },
   difficulty: { type: String, enum: ['easy', 'medium', 'hard'], default: 'medium' },
   examType:   { type: String, enum: ['mcq', 'descriptive', 'mixed', 'coding'], default: 'mcq' },
   topics:     [String],

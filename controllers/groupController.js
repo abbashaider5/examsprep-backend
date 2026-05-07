@@ -22,6 +22,12 @@ const assertGroupAccess = async (groupId, user) => {
   const isMember = group.members.map(id => id.toString()).includes(uid);
   const isOwner  = group.instructor.toString() === uid;
   const isAdmin  = user.role === 'admin';
+  if (
+    !isAdmin && user.enterpriseId && group.enterpriseId
+    && user.enterpriseId.toString() !== group.enterpriseId.toString()
+  ) {
+    return { error: 'Not a member of this group', status: 403 };
+  }
   if (!isMember && !isOwner && !isAdmin) return { error: 'Not a member of this group', status: 403 };
   return { group, isOwner: isOwner || isAdmin };
 };
@@ -40,6 +46,7 @@ export async function createGroup(req, res) {
       name: name.trim(),
       description: description?.trim() || '',
       instructor: req.user._id,
+      enterpriseId: req.user.enterpriseId || null,
       settings: {
         allowMedia:  settings?.allowMedia  !== false,
         whoCanSend:  settings?.whoCanSend  || 'all',
@@ -61,7 +68,13 @@ export async function getMyGroups(req, res) {
 
     let groups;
     if (isInstructor(req.user)) {
-      groups = await Group.find({ instructor: req.user._id, isActive: true })
+      const ownerQ = { instructor: req.user._id, isActive: true };
+      if (req.user.enterpriseId) {
+        ownerQ.enterpriseId = req.user.enterpriseId;
+      } else {
+        ownerQ.$or = [{ enterpriseId: null }, { enterpriseId: { $exists: false } }];
+      }
+      groups = await Group.find(ownerQ)
         .populate('members', 'name email')
         .populate({ path: 'sharedExams.exam', select: 'title subject difficulty' })
         .sort({ createdAt: -1 })

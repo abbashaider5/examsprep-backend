@@ -20,7 +20,8 @@ export const updateSystemSettings = async (req, res, next) => {
       'proctoringEnabled', 'certificatesEnabled', 'leaderboardEnabled', 'studyModeEnabled', 'gamificationEnabled',
       'certShowQRCode', 'certShowProctoredBadge', 'certShowInstructorName',
       'certPrimaryColor', 'certAccentColor', 'certOrganizationName', 'certFooterText',
-      'planPricePro', 'planPriceEnterprise',
+      'planPricePro',
+      'enterpriseCostPerTeacher', 'enterpriseCostPerExam', 'enterpriseCostPerQuestion', 'enterpriseCostAiProctoring',
     ];
 
     const updates = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowedKeys.includes(k)));

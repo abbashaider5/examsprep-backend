@@ -5,6 +5,7 @@ const examInviteSchema = new mongoose.Schema({
   exam: { type: mongoose.Schema.Types.ObjectId, ref: 'Exam', required: true },
   invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', default: null },
+  classId: { type: mongoose.Schema.Types.ObjectId, ref: 'SchoolClass', default: null },
   email: { type: String, required: true, lowercase: true, trim: true },
   /** For multipleSets exams: which variant (0..2) this student is assigned */
   assignedVariantIndex: { type: Number, default: null, min: 0, max: 9 },

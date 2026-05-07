@@ -97,20 +97,50 @@ const notice = (text, bg = '#fffbeb', border = '#fde68a', color = '#92400e') =>
 const hr = () => `<hr style="border:none;border-top:1px solid #e2e8f0;margin:16px 0;"/>`;
 
 // ── 1. Welcome ────────────────────────────────────────────────────────────────
-export const sendWelcomeEmail = async ({ email, name }) => {
+export const sendWelcomeEmail = async ({ email, name, role = 'user' }) => {
+  const normalized = role === 'principal' ? 'principal' : (role === 'instructor' ? 'instructor' : 'user');
+  const title = normalized === 'principal'
+    ? `Welcome, ${name}! Your enterprise workspace is ready.`
+    : normalized === 'instructor'
+      ? `Welcome, ${name}! Your instructor workspace is ready.`
+      : `Welcome, ${name}!`;
+  const intro = normalized === 'principal'
+    ? `You've joined <strong>${BRAND}</strong> as an <strong>Enterprise Admin</strong>. Manage teachers, review activity, and maintain organization standards.`
+    : normalized === 'instructor'
+      ? `You've joined <strong>${BRAND}</strong> as an <strong>Instructor</strong>. Create tests, invite learners, and track performance insights.`
+      : `You've joined <strong>${BRAND}</strong> as a <strong>Student</strong>. Practice exams, improve skills, and earn certificates.`;
+  const ctaUrl = normalized === 'principal'
+    ? `${EMAIL_PUBLIC_LINK_BASE}/enterprise-dashboard`
+    : normalized === 'instructor'
+      ? `${EMAIL_PUBLIC_LINK_BASE}/instructor-dashboard`
+      : `${EMAIL_PUBLIC_LINK_BASE}/dashboard`;
+  const ctaText = normalized === 'principal' ? 'Open Enterprise Dashboard' : normalized === 'instructor' ? 'Open Instructor Dashboard' : 'Go to Dashboard';
+  const rows = normalized === 'principal'
+    ? [
+        ['Teacher management', 'Invite, monitor, and manage your organization teachers'],
+        ['Activity visibility', 'Track enterprise events and system usage'],
+        ['Plan governance', 'Run with controls defined by your super admin'],
+      ]
+    : normalized === 'instructor'
+      ? [
+        ['Create exams', 'Generate assessments on your topics quickly'],
+        ['Manage learners', 'Invite students and track progress from reports'],
+        ['Improve outcomes', 'Use analytics to identify weak areas'],
+      ]
+      : [
+        ['Attempt exams', 'Join and complete tests shared with you'],
+        ['Track progress', 'Review your performance and weak topics'],
+        ['Earn certificates', 'Pass exams to get verifiable certificates'],
+      ];
   const html = layout(`
-    <h2 style="margin:0 0 6px;font-size:20px;color:#0f172a;">Welcome, ${name}!</h2>
-    <p style="color:#475569;font-size:13px;line-height:1.6;margin:0 0 16px;">You've joined <strong>${BRAND}</strong>. Here's what you can do right away:</p>
+    <h2 style="margin:0 0 6px;font-size:20px;color:#0f172a;">${title}</h2>
+    <p style="color:#475569;font-size:13px;line-height:1.6;margin:0 0 16px;">${intro}</p>
     <table cellpadding="0" cellspacing="0" width="100%" style="margin-bottom:20px;">
-      ${[
-        ['Generate exams', 'Create MCQs and assessments on any topic in seconds'],
-        ['Track progress', 'View your analytics and identify weak areas'],
-        ['Earn certificates', 'Pass with 75%+ to get a verifiable PDF certificate'],
-      ].map(([t, d]) =>
+      ${rows.map(([t, d]) =>
         `<tr><td style="padding:6px 0;font-size:13px;color:#0f172a;font-weight:600;width:140px;">${t}</td><td style="padding:6px 0;font-size:12px;color:#64748b;">${d}</td></tr>`
       ).join('')}
     </table>
-    <div style="margin-bottom:8px;">${btn(`${EMAIL_PUBLIC_LINK_BASE}/dashboard`, 'Go to Dashboard')}</div>
+    <div style="margin-bottom:8px;">${btn(ctaUrl, ctaText)}</div>
     ${hr()}
     <p style="color:#94a3b8;font-size:11px;margin:0;text-align:center;">If you didn't sign up, please ignore this email.</p>
   `, `Welcome to ${BRAND}, ${name}!`);
@@ -132,6 +162,50 @@ export const sendAdminProvisionedAccountEmail = async ({ email, name, temporaryP
     <p style="color:#94a3b8;font-size:11px;margin:0;text-align:center;">If you were not expecting this account, contact support.</p>
   `, `Your ${BRAND} account is ready`);
   return send(email, `Your ${BRAND} account — sign-in details`, html);
+};
+
+/** New enterprise principal — optional temporary password for brand-new accounts. */
+export const sendEnterprisePrincipalWelcomeEmail = async ({
+  email,
+  name,
+  enterpriseName,
+  isNewAccount,
+  temporaryPassword,
+}) => {
+  const pwdBlock = isNewAccount && temporaryPassword
+    ? `<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;margin-bottom:16px;font-size:13px;color:#334155;">
+        <div><strong>Temporary password:</strong> <code style="background:#fff;padding:2px 8px;border-radius:4px;font-size:13px;border:1px solid #e2e8f0;">${temporaryPassword}</code></div>
+        <p style="margin:10px 0 0;font-size:12px;color:#64748b;">Sign in and change your password from your profile.</p>
+      </div>`
+    : '';
+  const html = layout(`
+    <h2 style="margin:0 0 6px;font-size:20px;color:#0f172a;">You're the admin for <strong>${enterpriseName}</strong></h2>
+    <p style="color:#475569;font-size:13px;line-height:1.6;margin:0 0 16px;">Hi <strong>${name}</strong>, your organization <strong>${enterpriseName}</strong> is set up on <strong>${BRAND}</strong>. Use the enterprise dashboard to invite teachers and manage your team.</p>
+    ${pwdBlock}
+    <div style="margin-bottom:8px;">${btn(`${EMAIL_PUBLIC_LINK_BASE}/enterprise-dashboard`, 'Open enterprise dashboard')}</div>
+    ${notice('<strong>Tip:</strong> Your organization name appears in the header for you and your teachers.')}
+    ${hr()}
+    <p style="color:#94a3b8;font-size:11px;margin:0;text-align:center;">If this wasn’t expected, contact support.</p>
+  `, `${enterpriseName} on ${BRAND}`);
+  return send(email, `${enterpriseName} — your LikhitAI organization`, html);
+};
+
+export const sendEnterpriseTeacherInviteEmail = async ({
+  email,
+  teacherName,
+  enterpriseName,
+  principalName,
+  signupUrl,
+}) => {
+  const html = layout(`
+    <h2 style="margin:0 0 6px;font-size:20px;color:#0f172a;">Join <strong>${enterpriseName}</strong> on ${BRAND}</h2>
+    <p style="color:#475569;font-size:13px;line-height:1.6;margin:0 0 16px;">Hi <strong>${teacherName}</strong>, <strong>${principalName}</strong> invited you to teach under <strong>${enterpriseName}</strong>. Create your account (or sign in with the same email) using the link below.</p>
+    <div style="margin-bottom:8px;">${btn(signupUrl, 'Accept invitation')}</div>
+    ${notice('This invitation is tied to your email address. If you already have an account, use the same email when signing up or contact your admin.')}
+    ${hr()}
+    <p style="color:#94a3b8;font-size:11px;margin:0;text-align:center;">LikhitAI · Enterprise</p>
+  `, `Invitation to ${enterpriseName}`);
+  return send(email, `You're invited to teach at ${enterpriseName}`, html);
 };
 
 // ── 2. OTP ────────────────────────────────────────────────────────────────────

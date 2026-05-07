@@ -7,11 +7,25 @@ export const protect = async (req, res, next) => {
     if (!token) return res.status(401).json({ message: 'Not authenticated. Please log in.' });
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id).select('+refreshToken');
-    if (!user) return res.status(401).json({ message: 'User no longer exists.' });
-    if (user.isBlocked) return res.status(403).json({ message: 'Your account has been suspended.' });
+    const effectiveId = decoded.id;
+    const impersonatorId = decoded.imp || null;
 
-    req.user = user;
+    const effectiveUser = await User.findById(effectiveId).select('+refreshToken');
+    if (!effectiveUser) return res.status(401).json({ message: 'User no longer exists.' });
+    if (effectiveUser.isBlocked) return res.status(403).json({ message: 'Your account has been suspended.' });
+
+    let sessionUser = effectiveUser;
+    if (impersonatorId) {
+      const impUser = await User.findById(impersonatorId).select('+refreshToken');
+      if (!impUser || impUser.isBlocked) {
+        return res.status(401).json({ message: 'Session invalid. Please sign in again.' });
+      }
+      sessionUser = impUser;
+    }
+
+    req.user = effectiveUser;
+    req.sessionUser = sessionUser;
+    req.isImpersonating = Boolean(impersonatorId);
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
@@ -24,13 +38,25 @@ export const protect = async (req, res, next) => {
 /** Sets req.user when a valid session exists; otherwise req.user is null (no error). */
 export const optionalProtect = async (req, res, next) => {
   req.user = null;
+  req.sessionUser = null;
+  req.isImpersonating = false;
   try {
     const token = req.cookies?.accessToken || req.headers.authorization?.replace('Bearer ', '');
     if (!token) return next();
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id).select('_id role isBlocked');
-    if (!user || user.isBlocked) return next();
-    req.user = user;
+    const effectiveId = decoded.id;
+    const impersonatorId = decoded.imp || null;
+    const effectiveUser = await User.findById(effectiveId).select('_id role isBlocked enterpriseId');
+    if (!effectiveUser || effectiveUser.isBlocked) return next();
+    let sessionUser = effectiveUser;
+    if (impersonatorId) {
+      const impUser = await User.findById(impersonatorId).select('_id role isBlocked');
+      if (!impUser || impUser.isBlocked) return next();
+      sessionUser = impUser;
+    }
+    req.user = effectiveUser;
+    req.sessionUser = sessionUser;
+    req.isImpersonating = Boolean(impersonatorId);
     next();
   } catch {
     next();
@@ -38,7 +64,7 @@ export const optionalProtect = async (req, res, next) => {
 };
 
 export const requireAdmin = (req, res, next) => {
-  if (req.user?.role !== 'admin') {
+  if (req.sessionUser?.role !== 'admin') {
     return res.status(403).json({ message: 'Access denied. Admin only.' });
   }
   next();
@@ -51,14 +77,31 @@ export const requireInstructor = (req, res, next) => {
   next();
 };
 
-export const signAccessToken = (userId) => {
-  return jwt.sign({ id: userId }, process.env.JWT_SECRET, {
+/** Platform principals only; blocks when viewing as another user (impersonation). */
+export const requirePrincipal = (req, res, next) => {
+  if (req.isImpersonating) {
+    return res.status(403).json({ message: 'Exit view mode to use this feature.' });
+  }
+  if (req.sessionUser?.role !== 'principal') {
+    return res.status(403).json({ message: 'Access denied. Enterprise admin only.' });
+  }
+  next();
+};
+
+export const signAccessToken = (effectiveUserId, opts = {}) => {
+  const payload = { id: effectiveUserId.toString() };
+  if (opts.impersonatorId) {
+    payload.imp = opts.impersonatorId.toString();
+  }
+  return jwt.sign(payload, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || '7d',
   });
 };
 
-export const signRefreshToken = (userId) => {
-  return jwt.sign({ id: userId }, process.env.JWT_REFRESH_SECRET, {
+export const signRefreshToken = (sessionUserId, opts = {}) => {
+  const payload = { id: sessionUserId.toString() };
+  if (opts.actAs) payload.actAs = opts.actAs.toString();
+  return jwt.sign(payload, process.env.JWT_REFRESH_SECRET, {
     expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d',
   });
 };
@@ -74,9 +117,12 @@ const cookieOpts = (maxAge) => ({
   maxAge,
 });
 
-export const setAuthCookies = (res, userId) => {
-  const accessToken = signAccessToken(userId);
-  const refreshToken = signRefreshToken(userId);
+/** @param {import('mongoose').Types.ObjectId|string} sessionUserId - logged-in account */
+export const setAuthCookies = (res, sessionUserId, opts = {}) => {
+  const actAs = opts.actAs || null;
+  const effectiveId = actAs || sessionUserId;
+  const accessToken = signAccessToken(effectiveId, actAs ? { impersonatorId: sessionUserId } : {});
+  const refreshToken = signRefreshToken(sessionUserId, { actAs });
   res.cookie('accessToken', accessToken, cookieOpts(7 * 24 * 60 * 60 * 1000));
   res.cookie('refreshToken', refreshToken, cookieOpts(30 * 24 * 60 * 60 * 1000));
   return { accessToken, refreshToken };

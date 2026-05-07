@@ -23,8 +23,7 @@ const getRzp = () => {
 };
 
 export const PLAN_PRICES = {
-  pro:        { amount: 14900, label: '₹149/month', name: 'Pro' },
-  enterprise: { amount: 34900, label: '₹349/month', name: 'Enterprise' },
+  pro: { amount: 14900, label: '₹149/month', name: 'Premium' },
 };
 
 /** Get plan prices — reads from SystemSettings, falls back to PLAN_PRICES */
@@ -32,15 +31,14 @@ const getEffectivePlanPrices = async () => {
   try {
     const settings = await getSettings();
     return {
-      pro:        { amount: settings.planPricePro || 14900,        name: 'Pro',        label: `₹${Math.round((settings.planPricePro || 14900) / 100)}/month` },
-      enterprise: { amount: settings.planPriceEnterprise || 34900, name: 'Enterprise', label: `₹${Math.round((settings.planPriceEnterprise || 34900) / 100)}/month` },
+      pro: { amount: settings.planPricePro || 14900, name: 'Premium', label: `₹${Math.round((settings.planPricePro || 14900) / 100)}/month` },
     };
   } catch {
     return PLAN_PRICES;
   }
 };
 
-/** POST /api/payments/create-order  { plan: 'pro' | 'enterprise' } */
+/** POST /api/payments/create-order  { plan: 'pro' } */
 export const createOrder = async (req, res, next) => {
   try {
     const { plan } = req.body;

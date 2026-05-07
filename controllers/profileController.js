@@ -99,6 +99,13 @@ export const updateProfile = async (req, res, next) => {
     const allowed = ['name', 'avatar', 'isPublic', 'twoFactorEnabled', 'schoolName', 'address', 'autoRenew'];
     const updates = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
 
+    // Enterprise principals and enterprise-linked instructors inherit organization details from Enterprise.
+    // They cannot edit schoolName/address from the profile page.
+    if ((req.user.role === 'principal') || (req.user.role === 'instructor' && req.user.enterpriseId)) {
+      delete updates.schoolName;
+      delete updates.address;
+    }
+
     if (updates.name !== undefined && !String(updates.name).trim()) {
       return next(new AppError('Name cannot be empty.', 400));
     }

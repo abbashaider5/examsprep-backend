@@ -4,6 +4,7 @@ import { AppError } from '../middleware/errorHandler.js';
 import Exam from '../models/Exam.js';
 import ExamInvite from '../models/ExamInvite.js';
 import Group from '../models/Group.js';
+import Enterprise from '../models/Enterprise.js';
 import Resource from '../models/Resource.js';
 import Screenshot from '../models/Screenshot.js';
 import UserExamShuffle from '../models/UserExamShuffle.js';
@@ -23,6 +24,7 @@ import { delCache, getCache, setCache } from '../services/cacheService.js';
 import { buildInstructorExamReportData } from '../utils/instructorExamReportData.js';
 import { isCloudinaryConfigured, uploadScreenshot } from '../services/cloudinaryService.js';
 import logger from '../utils/logger.js';
+import { log, fromReq } from '../utils/activityLogger.js';
 
 const downloadBuffer = (url) => new Promise((resolve, reject) => {
   const lib = url.startsWith('https') ? https : http;
@@ -53,9 +55,15 @@ export const createExam = async (req, res, next) => {
     const user = req.user;
 
     const multipleSets = Boolean(req.body.multipleSets);
+    let enterpriseConfig = null;
+    if (user.enterpriseId && (user.role === 'instructor' || user.role === 'principal')) {
+      enterpriseConfig = await Enterprise.findById(user.enterpriseId)
+        .select('examsPerTeacherLimit questionsPerExamLimit aiProctoringEnabled')
+        .lean();
+    }
     const usageMultiplier = multipleSets ? 3 : 1;
     user._syncMonthly();
-    const monthlyLimit = user.getMonthlyLimit();
+    const monthlyLimit = enterpriseConfig?.examsPerTeacherLimit || user.getMonthlyLimit();
     const used = user.examsCreatedThisMonth || 0;
     if (used + usageMultiplier > monthlyLimit) {
       return next(new AppError(
@@ -66,13 +74,16 @@ export const createExam = async (req, res, next) => {
       ));
     }
 
-    const maxQ = user.getMaxQuestions();
+    const maxQ = enterpriseConfig?.questionsPerExamLimit || user.getMaxQuestions();
     const requestedQ = Number(numQuestions);
     if (requestedQ > maxQ) {
       return next(new AppError(`Your ${user.getEffectivePlan()} plan allows up to ${maxQ} questions per exam.`, 403));
     }
 
-    if (proctored && !user.canUseProctoring()) {
+    if (proctored && enterpriseConfig && enterpriseConfig.aiProctoringEnabled === false) {
+      return next(new AppError('AI Proctoring is not enabled in your enterprise plan. Please contact your administrator.', 403));
+    }
+    if (proctored && !enterpriseConfig && !user.canUseProctoring()) {
       return next(new AppError('AI Proctoring requires a Pro or Enterprise plan.', 403));
     }
 
@@ -155,6 +166,7 @@ export const createExam = async (req, res, next) => {
       multipleSets,
       questionVariants,
       createdBy: user._id,
+      enterpriseId: user.enterpriseId || null,
       proctored: Boolean(proctored),
       timePerQuestion: tpq,
       passingPercentage:   Math.max(1, Math.min(100, Number(passingPercentage) || 75)),
@@ -175,6 +187,15 @@ export const createExam = async (req, res, next) => {
     user.examCreationsToday = (user.examCreationsToday || 0) + 1;
     user.lastExamCreationDate = new Date();
     await user.save({ validateBeforeSave: false });
+
+    await log({
+      user,
+      action: 'exam_created',
+      category: 'exam',
+      enterprise: user.enterpriseId || undefined,
+      metadata: { examId: exam._id.toString(), title: exam.title },
+      ...fromReq(req),
+    });
 
     // Invalidate exam/analytics caches
     await delCache(
@@ -216,6 +237,13 @@ export const updateExam = async (req, res, next) => {
     }
     if (req.body.expiryDate !== undefined) {
       exam.expiryDate = req.body.expiryDate ? new Date(req.body.expiryDate) : null;
+    }
+
+    if (exam.proctored && req.user.enterpriseId && (req.user.role === 'instructor' || req.user.role === 'principal')) {
+      const ent = await Enterprise.findById(req.user.enterpriseId).select('aiProctoringEnabled').lean();
+      if (ent && ent.aiProctoringEnabled === false) {
+        return next(new AppError('AI Proctoring is not enabled in your enterprise plan. Please contact your administrator.', 403));
+      }
     }
 
     await exam.save();

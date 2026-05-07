@@ -14,7 +14,11 @@ const userSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true, maxlength: 60 },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true, minlength: 6, select: false },
-  role: { type: String, enum: ['user', 'instructor', 'admin'], default: 'user' },
+  role: { type: String, enum: ['user', 'instructor', 'admin', 'principal'], default: 'user' },
+  /** Set for principal + enterprise instructors (+ optional enterprise students in school mode). */
+  enterpriseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Enterprise', default: null, index: true },
+  /** School mode: student accounts linked to a class within the enterprise. */
+  schoolClassId: { type: mongoose.Schema.Types.ObjectId, ref: 'SchoolClass', default: null, index: true },
   avatar: { type: String, default: '' },
   schoolName: { type: String, trim: true, maxlength: 120, default: '' },
   address: {
@@ -142,6 +146,10 @@ userSchema.methods.resetFailedLogins = async function () {
 
 userSchema.virtual('isInstructor').get(function() {
   return this.role === 'instructor' || this.role === 'admin';
+});
+
+userSchema.virtual('isPrincipal').get(function() {
+  return this.role === 'principal';
 });
 
 userSchema.virtual('planStatus').get(function() {

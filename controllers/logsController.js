@@ -11,6 +11,7 @@ export const getLogs = async (req, res, next) => {
     if (req.query.action) filter.action = req.query.action;
     if (req.query.severity) filter.severity = req.query.severity;
     if (req.query.userId) filter.user = req.query.userId;
+    if (req.query.enterpriseId) filter.enterprise = req.query.enterpriseId;
     if (req.query.from || req.query.to) {
       filter.createdAt = {};
       if (req.query.from) filter.createdAt.$gte = new Date(req.query.from);

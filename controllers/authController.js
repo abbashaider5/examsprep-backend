@@ -2,6 +2,8 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { OAuth2Client } from 'google-auth-library';
 import { setAuthCookies, clearAuthCookies, signAccessToken, isProd } from '../middleware/auth.js';
+import Enterprise from '../models/Enterprise.js';
+import EnterpriseTeacherInvite from '../models/EnterpriseTeacherInvite.js';
 import { AppError } from '../middleware/errorHandler.js';
 import ExamInvite from '../models/ExamInvite.js';
 import Exam from '../models/Exam.js';
@@ -45,6 +47,25 @@ async function acceptExamInviteForNewUser(user, token) {
   return examPath;
 }
 
+async function acceptEnterpriseInviteForUser(user, token) {
+  if (!token || typeof token !== 'string') return null;
+  const invite = await EnterpriseTeacherInvite.findOne({
+    token: token.trim(),
+    email: user.email.toLowerCase(),
+    status: 'pending',
+  });
+  if (!invite) return null;
+  const ent = await Enterprise.findById(invite.enterprise);
+  if (!ent) return null;
+  invite.status = 'accepted';
+  await invite.save();
+  user.role = 'instructor';
+  user.enterpriseId = ent._id;
+  if (user.plan === 'free') user.plan = 'enterprise';
+  await user.save({ validateBeforeSave: false });
+  return '/instructor-dashboard';
+}
+
 /** True when login/sign-up must verify a reCAPTCHA token (admin toggle on + secret key configured). */
 const recaptchaEnforcedForCredentials = (settings) =>
   settings.recaptchaLoginSignupEnabled !== false && !!process.env.RECAPTCHA_SECRET_KEY;
@@ -76,7 +97,7 @@ export const signup = async (req, res, next) => {
       return next(new AppError('New registrations are currently disabled.', 403));
     }
 
-    const { name, email, password, examInviteToken } = req.body;
+    const { name, email, password, examInviteToken, enterpriseInviteToken } = req.body;
     const existing = await User.findOne({ email });
     if (existing) return next(new AppError('An account with this email already exists.', 409));
 
@@ -93,6 +114,7 @@ export const signup = async (req, res, next) => {
         requiresOTP: true,
         email,
         examInviteToken: examInviteToken || null,
+        enterpriseInviteToken: enterpriseInviteToken || null,
         message: 'Verify your email to complete signup.',
       });
     }
@@ -101,17 +123,20 @@ export const signup = async (req, res, next) => {
     await User.findByIdAndUpdate(user._id, { refreshToken });
 
     if (settings.emailWelcomeEnabled) {
-      sendWelcomeEmail({ email, name }).catch(logger.error);
+      sendWelcomeEmail({ email, name, role: user.role }).catch(logger.error);
     }
 
     let redirectPath = null;
-    if (examInviteToken) {
+    if (enterpriseInviteToken) {
+      redirectPath = await acceptEnterpriseInviteForUser(user, enterpriseInviteToken);
+    }
+    if (!redirectPath && examInviteToken) {
       redirectPath = await acceptExamInviteForNewUser(user, examInviteToken);
     }
 
     res.status(201).json({
       message: 'Account created successfully',
-      user: sanitizeUser(user),
+      user: await buildUserResponse(user, {}),
       redirectPath,
     });
   } catch (err) { next(err); }
@@ -120,7 +145,7 @@ export const signup = async (req, res, next) => {
 // ── Verify OTP (completes signup or login) ────────────────────────────────────
 export const verifyOTP = async (req, res, next) => {
   try {
-    const { email, otp, purpose = 'login', examInviteToken } = req.body;
+    const { email, otp, purpose = 'login', examInviteToken, enterpriseInviteToken } = req.body;
     if (!email || !otp) return next(new AppError('Email and OTP are required', 400));
 
     const result = await OTPCode.verify(email, otp, purpose);
@@ -138,7 +163,7 @@ export const verifyOTP = async (req, res, next) => {
     if (purpose === 'signup') {
       const settings = await getSettings();
       if (settings.emailWelcomeEnabled) {
-        sendWelcomeEmail({ email, name: user.name }).catch(logger.error);
+        sendWelcomeEmail({ email, name: user.name, role: user.role }).catch(logger.error);
       }
     }
 
@@ -148,11 +173,16 @@ export const verifyOTP = async (req, res, next) => {
     await log({ user, action: 'otp_verified', category: 'auth', metadata: { purpose }, ...fromReq(req) });
 
     let redirectPath = null;
-    if (purpose === 'signup' && examInviteToken) {
-      redirectPath = await acceptExamInviteForNewUser(user, examInviteToken);
+    if (purpose === 'signup') {
+      if (enterpriseInviteToken) {
+        redirectPath = await acceptEnterpriseInviteForUser(user, enterpriseInviteToken);
+      }
+      if (!redirectPath && examInviteToken) {
+        redirectPath = await acceptExamInviteForNewUser(user, examInviteToken);
+      }
     }
 
-    res.json({ message: 'Verified successfully', user: sanitizeUser(user), redirectPath });
+    res.json({ message: 'Verified successfully', user: await buildUserResponse(user, {}), redirectPath });
   } catch (err) { next(err); }
 };
 
@@ -200,13 +230,13 @@ export const login = async (req, res, next) => {
     await User.findByIdAndUpdate(user._id, { refreshToken });
 
     await log({ user, action: 'login', category: 'auth', ...fromReq(req) });
-    res.json({ message: 'Login successful', user: sanitizeUser(user) });
+    res.json({ message: 'Login successful', user: await buildUserResponse(user, {}) });
   } catch (err) { next(err); }
 };
 
 export const googleAuth = async (req, res, next) => {
   try {
-    const { credential, role, examInviteToken } = req.body;
+    const { credential, role, examInviteToken, enterpriseInviteToken } = req.body;
     if (!credential) return next(new AppError('Google credential is required.', 400));
     if (!googleClient || !process.env.GOOGLE_CLIENT_ID) {
       return next(new AppError('Google sign-in is not configured on the server.', 503));
@@ -246,7 +276,7 @@ export const googleAuth = async (req, res, next) => {
       });
       await log({ user, action: 'signup_google', category: 'auth', ...fromReq(req) });
       if (settings.emailWelcomeEnabled) {
-        sendWelcomeEmail({ email, name: user.name }).catch(logger.error);
+        sendWelcomeEmail({ email, name: user.name, role: user.role }).catch(logger.error);
       }
     } else {
       if (user.isBlocked) return next(new AppError('Your account has been suspended. Contact support.', 403));
@@ -271,13 +301,16 @@ export const googleAuth = async (req, res, next) => {
     });
 
     let redirectPath = null;
-    if (examInviteToken && typeof examInviteToken === 'string') {
+    if (enterpriseInviteToken && typeof enterpriseInviteToken === 'string') {
+      redirectPath = await acceptEnterpriseInviteForUser(user, enterpriseInviteToken);
+    }
+    if (!redirectPath && examInviteToken && typeof examInviteToken === 'string') {
       redirectPath = await acceptExamInviteForNewUser(user, examInviteToken);
     }
 
     res.json({
       message: isNewUser ? 'Account created with Google' : 'Signed in with Google',
-      user: sanitizeUser(user),
+      user: await buildUserResponse(user, {}),
       ...(redirectPath ? { redirectPath } : {}),
     });
   } catch (err) {
@@ -292,12 +325,15 @@ export const refreshAccessToken = async (req, res, next) => {
     if (!token) return next(new AppError('No refresh token', 401));
 
     const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
-    const user = await User.findById(decoded.id).select('+refreshToken');
+    const sessionUserId = decoded.id;
+    const actAs = decoded.actAs || null;
+    const user = await User.findById(sessionUserId).select('+refreshToken');
     if (!user || user.refreshToken !== token) {
       return next(new AppError('Invalid refresh token', 401));
     }
 
-    const accessToken = signAccessToken(user._id);
+    const effectiveId = actAs || sessionUserId;
+    const accessToken = signAccessToken(effectiveId, actAs ? { impersonatorId: sessionUserId } : {});
     res.cookie('accessToken', accessToken, {
       httpOnly: true, secure: isProd(),
       sameSite: isProd() ? 'none' : 'lax',
@@ -327,8 +363,8 @@ export const logout = async (req, res) => {
 };
 
 // ── Get Me ────────────────────────────────────────────────────────────────────
-export const getMe = (req, res) => {
-  res.json({ user: sanitizeUser(req.user) });
+export const getMe = async (req, res) => {
+  res.json({ user: await buildUserResponse(req.user, req) });
 };
 
 // ── Forgot Password (request OTP) ─────────────────────────────────────────────
@@ -414,6 +450,8 @@ const sanitizeUser = (user) => ({
   email: user.email,
   role: user.role,
   isInstructor: ['instructor', 'admin'].includes(user.role),
+  isPrincipal: user.role === 'principal',
+  enterpriseId: user.enterpriseId || null,
   xp: user.xp,
   level: user.level,
   streak: user.streak,
@@ -440,3 +478,38 @@ const sanitizeUser = (user) => ({
   monthlyLimit: user.getMonthlyLimit ? user.getMonthlyLimit() : 3,
   lifetimeExamsCreated: user.lifetimeExamsCreated ?? 0,
 });
+
+async function buildUserResponse(user, req) {
+  const base = sanitizeUser(user);
+  let enterprise = null;
+  if (user.enterpriseId) {
+    const ent = await Enterprise.findById(user.enterpriseId)
+      .select('name mode address examsPerTeacherLimit questionsPerExamLimit aiProctoringEnabled estimatedMonthlyCost')
+      .lean();
+    if (ent) {
+      enterprise = {
+        id: ent._id,
+        name: ent.name,
+        mode: ent.mode,
+        address: ent.address || {},
+        examsPerTeacherLimit: ent.examsPerTeacherLimit ?? 30,
+        questionsPerExamLimit: ent.questionsPerExamLimit ?? 100,
+        aiProctoringEnabled: ent.aiProctoringEnabled !== false,
+        estimatedMonthlyCost: ent.estimatedMonthlyCost || 0,
+      };
+      if (user.role === 'instructor' || user.role === 'principal') {
+        base.monthlyLimit = enterprise.examsPerTeacherLimit;
+        base.remaining = Math.max(0, (enterprise.examsPerTeacherLimit || 0) - (user.examsCreatedThisMonth || 0));
+      }
+    }
+  }
+  let impersonation = null;
+  if (req?.isImpersonating && req.sessionUser) {
+    impersonation = {
+      principalId: req.sessionUser._id,
+      principalName: req.sessionUser.name,
+      viewingAs: { id: user._id, name: user.name, email: user.email },
+    };
+  }
+  return { ...base, enterprise, impersonation };
+}
