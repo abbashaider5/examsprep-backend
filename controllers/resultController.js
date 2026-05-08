@@ -58,7 +58,7 @@ export const submitResult = async (req, res, next) => {
       return next(new AppError('This test has expired', 403));
     }
 
-    const autoTerminated = violations >= 3;
+    const autoTerminated = false;
     const sanitizedEvents = Array.isArray(proctoringEvents)
       ? proctoringEvents
           .filter(e => e && typeof e.message === 'string')
@@ -239,7 +239,7 @@ export const submitResult = async (req, res, next) => {
       incorrectCount, unattemptedCount, percentage, timeTaken,
       passed, proctored: exam.proctored, violations: violations || 0,
       proctoringEvents: sanitizedEvents,
-      terminatedByProctoring: autoTerminated && !!exam.proctored,
+      terminatedByProctoring: false,
       topicAccuracy, xpEarned, certificateId: certificate?._id,
       hasCodingQuestions: hasCodingQuestions || hasDescriptiveQuestions,
     });
@@ -285,10 +285,10 @@ export const submitResult = async (req, res, next) => {
       user: req.user, action: 'exam_submitted', category: 'exam',
       metadata: { examId, percentage, passed, violations, autoTerminated, passThreshold },
       ...fromReq(req),
-      severity: autoTerminated ? 'warning' : 'info',
+      severity: violations > 0 ? 'warning' : 'info',
     });
 
-    if (autoTerminated && exam.proctored && settings.emailProctoringViolationEnabled) {
+    if (false && exam.proctored && settings.emailProctoringViolationEnabled) {
       // Notify student
       sendProctoringViolationEmail({
         email: user.email, name: user.name,
@@ -338,7 +338,7 @@ export const submitResult = async (req, res, next) => {
         id: result._id, score: correctCount, total, percentage, passed,
         correctCount, incorrectCount, unattemptedCount, timeTaken,
         topicAccuracy, xpEarned, violations, passThreshold,
-        terminatedByProctoring: autoTerminated && !!exam.proctored,
+        terminatedByProctoring: false,
         proctoringEvents: sanitizedEvents,
         certificate: certificate ? { certId: certificate.certId, id: certificate._id } : null,
         showResultToUser:  exam.showResultToUser  !== false,

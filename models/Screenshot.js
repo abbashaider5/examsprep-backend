@@ -6,6 +6,10 @@ const screenshotSchema = new mongoose.Schema({
   result:     { type: mongoose.Schema.Types.ObjectId, ref: 'Result', default: null },
   imageData:  { type: String, default: null },   // base64 JPEG (fallback when Cloudinary not configured)
   imageUrl:   { type: String, default: null },   // Cloudinary URL (preferred)
+  eventType:  { type: String, default: 'periodic_capture' },
+  eventSource:{ type: String, default: 'client' },
+  eventMessage: { type: String, default: '' },
+  metadata:   { type: Map, of: String, default: {} },
   capturedAt: { type: Date, default: Date.now },
 }, { timestamps: false });
 

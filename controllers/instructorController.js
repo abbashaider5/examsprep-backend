@@ -165,6 +165,12 @@ export const getExamScreenshots = async (req, res, next) => {
   try {
     const exam = await Exam.findOne({ _id: req.params.examId, createdBy: req.user._id }).select('_id title');
     if (!exam) return next(new AppError('Exam not found or unauthorized', 404));
+    if (req.user.enterpriseId) {
+      const ent = await Enterprise.findById(req.user.enterpriseId).select('aiProctoringEnabled').lean();
+      if (ent && ent.aiProctoringEnabled === false) {
+        return next(new AppError('AI Proctoring is disabled in your enterprise plan.', 403));
+      }
+    }
 
     const screenshots = await Screenshot.find({ exam: exam._id })
       .populate('user', 'name email')
@@ -718,6 +724,12 @@ export const getStudentExamReport = async (req, res, next) => {
     if (!exam) return next(new AppError('Exam not found', 404));
     if (exam.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return next(new AppError('Not authorized', 403));
+    }
+    if (req.user.enterpriseId && exam.proctored) {
+      const ent = await Enterprise.findById(req.user.enterpriseId).select('aiProctoringEnabled').lean();
+      if (ent && ent.aiProctoringEnabled === false) {
+        return next(new AppError('AI Proctoring is disabled in your enterprise plan.', 403));
+      }
     }
 
     const student = await User.findById(userId).select('name email plan role');

@@ -4,8 +4,8 @@ import dotenv from 'dotenv';
 import express from 'express';
 import mongoSanitize from 'express-mongo-sanitize';
 import helmet from 'helmet';
-import morgan from 'morgan';
 import mongoose from 'mongoose';
+import morgan from 'morgan';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -18,32 +18,32 @@ import { validateEnv } from './utils/validateEnv.js';
 validateEnv();
 
 import { connectDB } from './config/db.js';
-import { seedHelpTopicsIfEmpty } from './utils/seedHelpTopics.js';
 import { errorHandler } from './middleware/errorHandler.js';
-import logger from './utils/logger.js';
 import { apiLimiter } from './middleware/rateLimiter.js';
 import { getSettings } from './models/SystemSettings.js';
+import logger from './utils/logger.js';
+import { seedHelpTopicsIfEmpty } from './utils/seedHelpTopics.js';
 
 import adminRoutes from './routes/admin.js';
+import announcementRoutes from './routes/announcements.js';
 import authRoutes from './routes/auth.js';
 import certificateRoutes from './routes/certificate.js';
+import contactRoutes from './routes/contact.js';
+import enterpriseRoutes from './routes/enterprise.js';
 import examRoutes from './routes/exam.js';
+import feedbackRoutes from './routes/feedback.js';
+import groupRoutes from './routes/groups.js';
+import helpRoutes from './routes/help.js';
+import instructorRoutes from './routes/instructor.js';
 import leaderboardRoutes from './routes/leaderboard.js';
 import logsRoutes from './routes/logs.js';
+import notificationRoutes from './routes/notifications.js';
+import paymentRoutes from './routes/payment.js';
 import profileRoutes from './routes/profile.js';
+import resourceRoutes from './routes/resources.js';
 import resultRoutes from './routes/result.js';
 import settingsRoutes from './routes/settings.js';
-import paymentRoutes from './routes/payment.js';
-import instructorRoutes from './routes/instructor.js';
-import feedbackRoutes from './routes/feedback.js';
-import contactRoutes from './routes/contact.js';
-import announcementRoutes from './routes/announcements.js';
-import groupRoutes from './routes/groups.js';
-import notificationRoutes from './routes/notifications.js';
-import resourceRoutes from './routes/resources.js';
 import ticketRoutes from './routes/tickets.js';
-import helpRoutes from './routes/help.js';
-import enterpriseRoutes from './routes/enterprise.js';
 
 const app = express();
 
@@ -117,7 +117,7 @@ app.use((req, res, next) => {
   // Most endpoints depend on DB (including auth); be explicit and fast.
   return res.status(503).json({
     message:
-      'Database unavailable. Start a local MongoDB or whitelist your IP in MongoDB Atlas, then restart the server.',
+      'Something went wrong. Please try again later.',
     details:
       process.env.NODE_ENV === 'development'
         ? {

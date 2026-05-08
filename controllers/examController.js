@@ -400,7 +400,13 @@ export const parsePDF = async (req, res, next) => {
 /** POST /api/exams/:id/screenshot */
 export const saveScreenshot = async (req, res, next) => {
   try {
-    const { imageData: rawImageData } = req.body;
+    const {
+      imageData: rawImageData,
+      eventType = 'periodic_capture',
+      eventSource = 'client',
+      eventMessage = '',
+      metadata = {},
+    } = req.body;
     if (!rawImageData || typeof rawImageData !== 'string') {
       return next(new AppError('imageData is required', 400));
     }
@@ -430,6 +436,16 @@ export const saveScreenshot = async (req, res, next) => {
       user: req.user._id,
       imageData,
       imageUrl,
+      eventType: String(eventType || 'periodic_capture').slice(0, 100),
+      eventSource: String(eventSource || 'client').slice(0, 100),
+      eventMessage: String(eventMessage || '').slice(0, 500),
+      metadata: (metadata && typeof metadata === 'object')
+        ? Object.fromEntries(
+            Object.entries(metadata)
+              .slice(0, 20)
+              .map(([k, v]) => [String(k).slice(0, 60), String(v).slice(0, 200)]),
+          )
+        : {},
     });
 
     res.status(201).json({ saved: true, screenshotId: screenshot._id });
