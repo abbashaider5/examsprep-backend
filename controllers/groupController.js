@@ -1,12 +1,15 @@
 import Exam from '../models/Exam.js';
 import Group from '../models/Group.js';
 import GroupInvite from '../models/GroupInvite.js';
+import GroupChatModeration from '../models/GroupChatModeration.js';
 import GroupMessage from '../models/GroupMessage.js';
+import ChatModerationLog from '../models/ChatModerationLog.js';
 import User from '../models/User.js';
 import { createNotificationsForUsers } from './notificationController.js';
 import { uploadGroupMedia } from '../services/cloudinaryService.js';
 import { sendGroupInviteEmail } from '../services/emailService.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
+import { detectAbusiveContent } from '../utils/chatModeration.js';
 import logger from '../utils/logger.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -14,6 +17,9 @@ import logger from '../utils/logger.js';
 const isInstructor = (user) => user.role === 'instructor' || user.role === 'admin';
 const isPro       = (user) => ['pro', 'enterprise'].includes(user.plan) || user.role === 'admin';
 const CLIENT_URL  = process.env.CLIENT_URL || 'http://localhost:5173';
+const WARNING_LIMIT = 3;
+const MODERATION_REPLACEMENT_TEXT = '⚠ Message removed due to inappropriate language.';
+const CHAT_BLOCKED_TEXT = '🚫 Your chat access has been blocked due to repeated inappropriate language.';
 
 const assertGroupAccess = async (groupId, user) => {
   const group = await Group.findById(groupId);
@@ -500,8 +506,20 @@ export async function getMessages(req, res) {
       .lean();
 
     messages.reverse();
-    const hasMore = messages.length === limit;
-    res.json({ messages, hasMore });
+    const [hasMore, moderation] = await Promise.all([
+      messages.length === limit,
+      GroupChatModeration.findOne({ group: req.params.id, user: req.user._id }).lean(),
+    ]);
+
+    res.json({
+      messages,
+      hasMore,
+      moderation: {
+        warningCount: moderation?.warningCount || 0,
+        isBlocked: !!moderation?.isBlocked,
+        blockMessage: moderation?.isBlocked ? CHAT_BLOCKED_TEXT : null,
+      },
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -519,6 +537,27 @@ export async function sendMessage(req, res) {
 
     const { text, replyTo, mediaBase64, mediaType, fileName, fileSize } = req.body;
     if (!text?.trim() && !mediaBase64) return res.status(400).json({ message: 'Message or media required' });
+
+    const moderationState = await GroupChatModeration.findOne({ group: req.params.id, user: req.user._id });
+    if (moderationState?.isBlocked) {
+      await ChatModerationLog.create({
+        group: req.params.id,
+        user: req.user._id,
+        originalMessage: text?.trim() || '[media-only message]',
+        normalizedMessage: '',
+        detectedContent: [],
+        warningCount: moderationState.warningCount || WARNING_LIMIT,
+        action: 'blocked_message_attempt',
+      });
+      return res.status(403).json({
+        message: CHAT_BLOCKED_TEXT,
+        code: 'CHAT_BLOCKED',
+        moderation: {
+          warningCount: moderationState.warningCount || WARNING_LIMIT,
+          isBlocked: true,
+        },
+      });
+    }
 
     let mediaUrl = null;
     let resolvedMediaType = null;
@@ -547,24 +586,65 @@ export async function sendMessage(req, res) {
       }
     }
 
-    const msg = await GroupMessage.create({
-      group:     req.params.id,
-      sender:    req.user._id,
-      text:      text?.trim() || null,
-      replyTo:   replyTo || null,
-      type:      mediaBase64 ? 'media' : 'text',
-      mediaUrl,
-      mediaType: resolvedMediaType,
-      fileName:  resolvedFileName,
-      fileSize:  fileSize || null,
-    });
+    const hasText = !!text?.trim();
+    const detection = hasText ? detectAbusiveContent(text.trim()) : { isAbusive: false, normalized: '', detected: [] };
+
+    let msg;
+    let moderationPayload = { warningCount: 0, isBlocked: false, warningMessage: null, blockedMessage: null };
+
+    if (detection.isAbusive) {
+      const state = moderationState || await GroupChatModeration.create({ group: req.params.id, user: req.user._id });
+      state.warningCount = Math.min((state.warningCount || 0) + 1, WARNING_LIMIT);
+      state.lastViolationAt = new Date();
+      state.lastViolationMessage = text.trim();
+      state.isBlocked = state.warningCount >= WARNING_LIMIT;
+      state.blockedAt = state.isBlocked ? new Date() : null;
+      await state.save();
+
+      await ChatModerationLog.create({
+        group: req.params.id,
+        user: req.user._id,
+        originalMessage: text.trim(),
+        normalizedMessage: detection.normalized,
+        detectedContent: detection.detected,
+        warningCount: state.warningCount,
+        action: state.isBlocked ? 'blocked' : 'warned',
+      });
+
+      msg = await GroupMessage.create({
+        group: req.params.id,
+        sender: req.user._id,
+        text: MODERATION_REPLACEMENT_TEXT,
+        replyTo: replyTo || null,
+        type: 'text',
+      });
+
+      moderationPayload = {
+        warningCount: state.warningCount,
+        isBlocked: state.isBlocked,
+        warningMessage: state.isBlocked ? null : `Warning ${state.warningCount}/${WARNING_LIMIT}`,
+        blockedMessage: state.isBlocked ? CHAT_BLOCKED_TEXT : null,
+      };
+    } else {
+      msg = await GroupMessage.create({
+        group: req.params.id,
+        sender: req.user._id,
+        text: text?.trim() || null,
+        replyTo: replyTo || null,
+        type: mediaBase64 ? 'media' : 'text',
+        mediaUrl,
+        mediaType: resolvedMediaType,
+        fileName: resolvedFileName,
+        fileSize: fileSize || null,
+      });
+    }
 
     const populated = await GroupMessage.findById(msg._id)
       .populate('sender', 'name email role')
       .populate({ path: 'replyTo', populate: { path: 'sender', select: 'name' } })
       .lean();
 
-    res.status(201).json({ message: populated });
+    res.status(201).json({ message: populated, moderation: moderationPayload });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -601,10 +681,104 @@ export async function editMessage(req, res) {
     if (msg.type !== 'text') return res.status(400).json({ message: 'Only text messages can be edited' });
     if (!text?.trim()) return res.status(400).json({ message: 'Message text required' });
 
+    const moderationState = await GroupChatModeration.findOne({ group: id, user: req.user._id });
+    if (moderationState?.isBlocked) {
+      return res.status(403).json({ message: CHAT_BLOCKED_TEXT, code: 'CHAT_BLOCKED' });
+    }
+
+    const detection = detectAbusiveContent(text.trim());
+    if (detection.isAbusive) {
+      const state = moderationState || await GroupChatModeration.create({ group: id, user: req.user._id });
+      state.warningCount = Math.min((state.warningCount || 0) + 1, WARNING_LIMIT);
+      state.lastViolationAt = new Date();
+      state.lastViolationMessage = text.trim();
+      state.isBlocked = state.warningCount >= WARNING_LIMIT;
+      state.blockedAt = state.isBlocked ? new Date() : null;
+      await state.save();
+
+      await ChatModerationLog.create({
+        group: id,
+        user: req.user._id,
+        originalMessage: text.trim(),
+        normalizedMessage: detection.normalized,
+        detectedContent: detection.detected,
+        warningCount: state.warningCount,
+        action: state.isBlocked ? 'blocked' : 'warned',
+      });
+
+      msg.text = MODERATION_REPLACEMENT_TEXT;
+      msg.edited = true;
+      await msg.save();
+      return res.json({
+        message: state.isBlocked ? CHAT_BLOCKED_TEXT : `Warning ${state.warningCount}/${WARNING_LIMIT}`,
+        moderation: {
+          warningCount: state.warningCount,
+          isBlocked: state.isBlocked,
+        },
+      });
+    }
+
     msg.text = text.trim();
     msg.edited = true;
     await msg.save();
     res.json({ message: 'Message updated' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+}
+
+export async function getChatModerationStatus(req, res) {
+  try {
+    const { group, error, status, isOwner } = await assertGroupAccess(req.params.id, req.user);
+    if (error) return res.status(status).json({ message: error });
+    if (!isOwner) return res.status(403).json({ message: 'Only instructor can view moderation data' });
+
+    const records = await GroupChatModeration.find({ group: group._id, $or: [{ warningCount: { $gt: 0 } }, { isBlocked: true }] })
+      .populate('user', 'name email role')
+      .sort({ isBlocked: -1, warningCount: -1, updatedAt: -1 })
+      .lean();
+
+    res.json({
+      users: records.map((r) => ({
+        user: r.user,
+        warningCount: r.warningCount || 0,
+        isBlocked: !!r.isBlocked,
+        blockedAt: r.blockedAt || null,
+        lastViolationAt: r.lastViolationAt || null,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+}
+
+export async function unlockChatUser(req, res) {
+  try {
+    const { group, error, status, isOwner } = await assertGroupAccess(req.params.id, req.user);
+    if (error) return res.status(status).json({ message: error });
+    if (!isOwner) return res.status(403).json({ message: 'Only instructor can unlock users' });
+
+    const target = await GroupChatModeration.findOne({ group: group._id, user: req.params.userId });
+    if (!target) return res.status(404).json({ message: 'No moderation record found for this user' });
+
+    target.warningCount = 0;
+    target.isBlocked = false;
+    target.blockedAt = null;
+    target.blockedBy = req.user._id;
+    await target.save();
+
+    await ChatModerationLog.create({
+      group: group._id,
+      user: req.params.userId,
+      originalMessage: 'Unlock action by instructor',
+      normalizedMessage: 'unlock action by instructor',
+      detectedContent: [],
+      warningCount: 0,
+      action: 'unlocked_by_instructor',
+      triggeredBy: req.user._id,
+    });
+
+    res.json({ message: 'Chat access restored for user' });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

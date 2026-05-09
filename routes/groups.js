@@ -11,6 +11,7 @@ import {
   deleteMessage,
   editMessage,
   getGroup,
+  getChatModerationStatus,
   getGroupInvites,
   getMessages,
   getMyGroupInvites,
@@ -20,6 +21,7 @@ import {
   removeMember,
   sendMessage,
   shareExam,
+  unlockChatUser,
   unshareExam,
   updateGroup,
   updateGroupSettings,
@@ -70,5 +72,7 @@ router.get('/:id/messages',           getMessages);
 router.post('/:id/messages',          sendMessage);
 router.patch('/:id/messages/:msgId',  editMessage);
 router.delete('/:id/messages/:msgId', deleteMessage);
+router.get('/:id/chat-moderation',    getChatModerationStatus);
+router.post('/:id/chat-moderation/unlock/:userId', unlockChatUser);
 
 export default router;
