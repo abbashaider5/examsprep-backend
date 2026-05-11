@@ -9,10 +9,16 @@ import {
   adminUpdateEnterprise,
   adminUpdateEnterpriseTeacherLimit,
   enterpriseCreateClass,
+  enterpriseUpdateClass,
+  enterpriseDeleteClass,
   enterpriseBulkInviteStudents,
+  enterpriseGetClassChatGroup,
   enterpriseInviteStudent,
   enterpriseListClasses,
+  enterpriseListMySchoolChats,
   enterpriseListStudents,
+  enterpriseUpdateStudent,
+  enterpriseDeleteStudent,
   principalCancelInvite,
   principalGetContext,
   principalGetLogs,
@@ -45,7 +51,13 @@ router.post('/principal/stop-impersonation', protect, principalStopImpersonation
 
 router.get('/school/classes', protect, enterpriseListClasses);
 router.post('/school/classes', protect, enterpriseCreateClass);
+router.get('/school/classes/:classId/chat-group', protect, enterpriseGetClassChatGroup);
+router.patch('/school/classes/:classId', protect, enterpriseUpdateClass);
+router.delete('/school/classes/:classId', protect, enterpriseDeleteClass);
+router.get('/school/my-chats', protect, enterpriseListMySchoolChats);
 router.get('/school/students', protect, enterpriseListStudents);
+router.patch('/school/students/:userId', protect, enterpriseUpdateStudent);
+router.delete('/school/students/:userId', protect, enterpriseDeleteStudent);
 router.post('/school/students', protect, enterpriseInviteStudent);
 router.post('/school/students/bulk', protect, enterpriseBulkInviteStudents);
 

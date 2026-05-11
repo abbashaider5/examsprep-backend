@@ -6,6 +6,7 @@ const screenshotSchema = new mongoose.Schema({
   result:     { type: mongoose.Schema.Types.ObjectId, ref: 'Result', default: null },
   imageData:  { type: String, default: null },   // base64 JPEG (fallback when Cloudinary not configured)
   imageUrl:   { type: String, default: null },   // Cloudinary URL (preferred)
+  cloudinaryPublicId: { type: String, default: null }, // for retention cleanup (image resource_type)
   eventType:  { type: String, default: 'periodic_capture' },
   eventSource:{ type: String, default: 'client' },
   eventMessage: { type: String, default: '' },
@@ -13,7 +14,6 @@ const screenshotSchema = new mongoose.Schema({
   capturedAt: { type: Date, default: Date.now },
 }, { timestamps: false });
 
-// TTL: auto-delete screenshots after 30 days
-screenshotSchema.index({ capturedAt: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });
+/** Retention is enforced by `proctoringScreenshotRetention` (DB + Cloudinary); no TTL index (TTL cannot remove remote files). */
 
 export default mongoose.model('Screenshot', screenshotSchema);

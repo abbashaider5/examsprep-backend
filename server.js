@@ -23,6 +23,7 @@ import { apiLimiter } from './middleware/rateLimiter.js';
 import { getSettings } from './models/SystemSettings.js';
 import logger from './utils/logger.js';
 import { seedHelpTopicsIfEmpty } from './utils/seedHelpTopics.js';
+import { scheduleProctoringScreenshotCleanup } from './services/proctoringScreenshotRetention.js';
 
 import adminRoutes from './routes/admin.js';
 import announcementRoutes from './routes/announcements.js';
@@ -54,6 +55,7 @@ await connectDB().catch((e) => {
 });
 if (!mongoBootError) {
   await seedHelpTopicsIfEmpty().catch(() => {});
+  scheduleProctoringScreenshotCleanup();
 }
 
 // If DB is down, fail fast (don't let Mongoose buffer requests indefinitely in dev)

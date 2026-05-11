@@ -6,8 +6,10 @@ import Group from '../models/Group.js';
 import Result from '../models/Result.js';
 import Screenshot from '../models/Screenshot.js';
 import SchoolClass from '../models/SchoolClass.js';
+import SchoolClassEnrollment from '../models/SchoolClassEnrollment.js';
 import User from '../models/User.js';
 import UserExamShuffle from '../models/UserExamShuffle.js';
+import { PROCTORING_SCREENSHOT_RETENTION_DAYS } from '../services/proctoringScreenshotRetention.js';
 import { buildInstructorExamReportData } from '../utils/instructorExamReportData.js';
 import { buildDisplayQuestions, getBaseQuestionsForExam } from '../utils/examShuffleRuntime.js';
 import { getSettings } from '../models/SystemSettings.js';
@@ -178,7 +180,7 @@ export const getExamScreenshots = async (req, res, next) => {
       .sort({ capturedAt: -1 })
       .limit(100);
 
-    res.json({ screenshots, exam });
+    res.json({ screenshots, exam, screenshotRetentionDays: PROCTORING_SCREENSHOT_RETENTION_DAYS });
   } catch (err) { next(err); }
 };
 
@@ -422,10 +424,31 @@ export const getDetailedAnalytics = async (req, res, next) => {
       const ent = await Enterprise.findById(req.user.enterpriseId).select('mode').lean();
       if (ent?.mode === 'school') {
         const classes = await SchoolClass.find({ enterprise: req.user.enterpriseId }).lean();
+        const enrollRows = await SchoolClassEnrollment.find({
+          enterprise: req.user.enterpriseId,
+          schoolClass: { $in: classes.map((cl) => cl._id) },
+        }).select('schoolClass user').lean();
+        const classIdToUserIds = new Map();
+        for (const row of enrollRows) {
+          const cid = row.schoolClass.toString();
+          if (!classIdToUserIds.has(cid)) classIdToUserIds.set(cid, new Set());
+          classIdToUserIds.get(cid).add(row.user.toString());
+        }
+        const legacyClassUsers = await User.find({
+          enterpriseId: req.user.enterpriseId,
+          role: 'user',
+          schoolClassId: { $in: classes.map((cl) => cl._id) },
+        }).select('_id schoolClassId').lean();
+        for (const u of legacyClassUsers) {
+          const cid = u.schoolClassId?.toString();
+          if (!cid) continue;
+          if (!classIdToUserIds.has(cid)) classIdToUserIds.set(cid, new Set());
+          classIdToUserIds.get(cid).add(u._id.toString());
+        }
+
         classPerformance = classes.map((c) => {
-          const classStudents = studentPerformance.filter(
-            (s) => s.user?.schoolClassId?.toString?.() === c._id.toString(),
-          );
+          const uidSet = classIdToUserIds.get(c._id.toString()) || new Set();
+          const classStudents = studentPerformance.filter((s) => uidSet.has(s.user._id.toString()));
           const totalAttemptsByClass = classStudents.reduce((a, s) => a + (s.attempts || 0), 0);
           const avgScoreByClass = classStudents.length
             ? Math.round(classStudents.reduce((a, s) => a + (s.avgScore || 0), 0) / classStudents.length)
@@ -547,11 +570,38 @@ export const sendClassInvite = async (req, res, next) => {
     const validClassIds = classIds.filter((id) => classIdSet.has(id.toString()));
     if (!validClassIds.length) return next(new AppError('Class not found', 404));
 
-    const students = await User.find({
+    const enrolledRows = await SchoolClassEnrollment.find({
+      schoolClass: { $in: validClassIds },
+    })
+      .populate('user', 'email name schoolClassId')
+      .lean();
+
+    const fromEnrollment = enrolledRows
+      .filter((r) => r.user)
+      .map((r) => ({
+        ...r.user,
+        _inviteClassId: r.schoolClass,
+      }));
+
+    const enrolledEmails = new Set(fromEnrollment.map((u) => u.email?.toLowerCase()).filter(Boolean));
+
+    const legacyStudents = await User.find({
       enterpriseId: req.user.enterpriseId,
       role: 'user',
       schoolClassId: { $in: validClassIds },
-    }).select('email name schoolClassId');
+    })
+      .select('email name schoolClassId')
+      .lean();
+
+    const students = [...fromEnrollment];
+    for (const u of legacyStudents) {
+      const em = u.email?.toLowerCase();
+      if (em && !enrolledEmails.has(em)) {
+        students.push({ ...u, _inviteClassId: u.schoolClassId });
+        enrolledEmails.add(em);
+      }
+    }
+
     if (!students.length) {
       return next(new AppError('No students found in this class', 400));
     }
@@ -574,7 +624,7 @@ export const sendClassInvite = async (req, res, next) => {
         exam: exam._id,
         invitedBy: req.user._id,
         email,
-        classId: validClassIds.find((cid) => cid.toString() === st.schoolClassId?.toString()) || null,
+        classId: validClassIds.find((cid) => cid.toString() === (st._inviteClassId || st.schoolClassId)?.toString()) || null,
         assignedVariantIndex,
       });
       sent++;
@@ -787,6 +837,7 @@ export const getStudentExamReport = async (req, res, next) => {
     res.json({
       exam: examOut,
       student,
+      screenshotRetentionDays: PROCTORING_SCREENSHOT_RETENTION_DAYS,
       attempts: results.map(r => ({
         _id: r._id,
         percentage: r.percentage,

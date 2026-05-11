@@ -423,9 +423,14 @@ export const saveScreenshot = async (req, res, next) => {
 
     let imageUrl = null;
     let imageData = null;
+    let cloudinaryPublicId = null;
 
     if (isCloudinaryConfigured()) {
-      imageUrl = await uploadScreenshot(rawImageData);
+      const uploaded = await uploadScreenshot(rawImageData);
+      if (uploaded?.secureUrl) {
+        imageUrl = uploaded.secureUrl;
+        cloudinaryPublicId = uploaded.publicId || null;
+      }
     }
     if (!imageUrl) {
       imageData = rawImageData;
@@ -436,6 +441,7 @@ export const saveScreenshot = async (req, res, next) => {
       user: req.user._id,
       imageData,
       imageUrl,
+      cloudinaryPublicId,
       eventType: String(eventType || 'periodic_capture').slice(0, 100),
       eventSource: String(eventSource || 'client').slice(0, 100),
       eventMessage: String(eventMessage || '').slice(0, 500),

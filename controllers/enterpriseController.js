@@ -3,12 +3,48 @@ import { AppError } from '../middleware/errorHandler.js';
 import { setAuthCookies } from '../middleware/auth.js';
 import Enterprise from '../models/Enterprise.js';
 import EnterpriseTeacherInvite from '../models/EnterpriseTeacherInvite.js';
+import ChatModerationLog from '../models/ChatModerationLog.js';
+import Group from '../models/Group.js';
+import GroupChatModeration from '../models/GroupChatModeration.js';
+import GroupMessage from '../models/GroupMessage.js';
 import SchoolClass from '../models/SchoolClass.js';
+import SchoolClassEnrollment from '../models/SchoolClassEnrollment.js';
 import { getSettings } from '../models/SystemSettings.js';
 import User from '../models/User.js';
+import { delCache } from '../services/cacheService.js';
+import {
+  ensureSchoolChatInfrastructure,
+  ensureSchoolClassChatGroup,
+  enrollUserInSchoolClass,
+  syncSchoolClassChatGroupTitle,
+  userHasSchoolClassAccess,
+} from '../services/schoolClassChatService.js';
 import ActivityLog from '../models/ActivityLog.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import { sendEnterprisePrincipalWelcomeEmail, sendEnterpriseTeacherInviteEmail } from '../services/emailService.js';
+
+function canManageSchoolClass(cls, reqUser, ent) {
+  if (!cls || !ent) return false;
+  if (reqUser.role === 'admin') return true;
+  if (reqUser.role === 'principal' && reqUser.enterpriseId?.toString() === ent._id.toString()) return true;
+  if (reqUser.role === 'instructor' && cls.teacher?.toString() === reqUser._id.toString()) return true;
+  return false;
+}
+
+/** Case-insensitive email match so existing accounts are reused (avoids duplicate key + missed reuse). */
+async function findUserByEmailCaseInsensitive(email) {
+  const em = String(email || '').toLowerCase().trim();
+  if (!em) return null;
+  let u = await User.findOne({ email: em });
+  if (u) return u;
+  try {
+    u = await User.findOne({ email: em }).collation({ locale: 'en', strength: 2 });
+  } catch {
+    u = null;
+  }
+  if (u) return u;
+  return User.findOne({ $expr: { $eq: [{ $toLower: '$email' }, em] } });
+}
 
 async function teacherUsageCount(enterpriseId) {
   const [instructors, pending] = await Promise.all([
@@ -258,7 +294,23 @@ export const adminDeleteEnterprise = async (req, res, next) => {
     );
 
     await EnterpriseTeacherInvite.updateMany({ enterprise: ent._id, status: 'pending' }, { status: 'cancelled' });
+
+    const schoolClasses = await SchoolClass.find({ enterprise: ent._id }).select('chatGroup').lean();
+    const chatGroupIds = schoolClasses.map((c) => c.chatGroup).filter(Boolean);
+    if (chatGroupIds.length) {
+      await GroupMessage.deleteMany({ group: { $in: chatGroupIds } });
+      await ChatModerationLog.deleteMany({ group: { $in: chatGroupIds } });
+      await GroupChatModeration.deleteMany({ group: { $in: chatGroupIds } });
+      await Group.deleteMany({ _id: { $in: chatGroupIds } });
+    }
+    await SchoolClassEnrollment.deleteMany({ enterprise: ent._id });
     await SchoolClass.deleteMany({ enterprise: ent._id });
+
+    await User.updateMany(
+      { enterpriseId: ent._id, role: 'user' },
+      { $set: { enterpriseId: null, schoolClassId: null, plan: 'free' } },
+    );
+
     await ent.deleteOne();
 
     res.json({ message: 'Enterprise deleted. Teachers kept as accounts and moved to free plan.' });
@@ -711,19 +763,21 @@ export const enterpriseListClasses = async (req, res, next) => {
     const ent = await Enterprise.findById(req.user.enterpriseId);
     if (!ent || ent.mode !== 'school') return next(new AppError('School mode only', 403));
 
+    await ensureSchoolChatInfrastructure(ent._id);
+
     const classes = await SchoolClass.find({ enterprise: ent._id })
       .populate('teacher', 'name email')
       .sort({ name: 1 })
       .lean();
-    const classIds = classes.map((c) => c._id);
-    const studentCounts = await User.aggregate([
-      { $match: { enterpriseId: ent._id, role: 'user', schoolClassId: { $in: classIds } } },
-      { $group: { _id: '$schoolClassId', count: { $sum: 1 } } },
+    const countAgg = await SchoolClassEnrollment.aggregate([
+      { $match: { enterprise: ent._id } },
+      { $group: { _id: '$schoolClass', count: { $sum: 1 } } },
     ]);
-    const countMap = new Map(studentCounts.map((x) => [x._id.toString(), x.count]));
+    const countMap = new Map(countAgg.map((x) => [x._id.toString(), x.count]));
     const withCounts = classes.map((c) => ({
       ...c,
       studentCount: countMap.get(c._id.toString()) || 0,
+      chatGroupId: c.chatGroup || null,
     }));
     res.json({ classes: withCounts });
   } catch (err) { next(err); }
@@ -746,7 +800,80 @@ export const enterpriseCreateClass = async (req, res, next) => {
       section: String(section).trim(),
       academicYear: String(academicYear).trim(),
     });
+    const created = await SchoolClass.findById(c._id);
+    try {
+      await ensureSchoolClassChatGroup(created);
+    } catch {
+      /* teacher always set on create */
+    }
     res.status(201).json({ class: c });
+  } catch (err) { next(err); }
+};
+
+export const enterpriseUpdateClass = async (req, res, next) => {
+  try {
+    if (!['instructor', 'admin', 'principal'].includes(req.user.role)) return next(new AppError('Forbidden', 403));
+    if (!req.user.enterpriseId) return next(new AppError('No enterprise', 403));
+    const ent = await Enterprise.findById(req.user.enterpriseId);
+    if (!ent || ent.mode !== 'school') return next(new AppError('School mode only', 403));
+
+    const cls = await SchoolClass.findOne({ _id: req.params.classId, enterprise: ent._id });
+    if (!cls) return next(new AppError('Class not found', 404));
+    if (!canManageSchoolClass(cls, req.user, ent)) return next(new AppError('Forbidden', 403));
+
+    const { name, section, academicYear } = req.body;
+    if (name !== undefined) {
+      const t = String(name).trim();
+      if (!t) return next(new AppError('Class name is required', 400));
+      cls.name = t;
+    }
+    if (section !== undefined) cls.section = String(section ?? '').trim();
+    if (academicYear !== undefined) cls.academicYear = String(academicYear ?? '').trim();
+    await cls.save();
+
+    const fresh = await SchoolClass.findById(cls._id);
+    try {
+      await ensureSchoolClassChatGroup(fresh);
+      await syncSchoolClassChatGroupTitle(fresh);
+    } catch {
+      /* class may lack teacher in edge cases */
+    }
+    res.json({ class: fresh });
+  } catch (err) { next(err); }
+};
+
+export const enterpriseDeleteClass = async (req, res, next) => {
+  try {
+    if (!['instructor', 'admin', 'principal'].includes(req.user.role)) return next(new AppError('Forbidden', 403));
+    if (!req.user.enterpriseId) return next(new AppError('No enterprise', 403));
+    const ent = await Enterprise.findById(req.user.enterpriseId);
+    if (!ent || ent.mode !== 'school') return next(new AppError('School mode only', 403));
+
+    const cls = await SchoolClass.findOne({ _id: req.params.classId, enterprise: ent._id });
+    if (!cls) return next(new AppError('Class not found', 404));
+    if (!canManageSchoolClass(cls, req.user, ent)) return next(new AppError('Forbidden', 403));
+
+    const enrollCount = await SchoolClassEnrollment.countDocuments({ schoolClass: cls._id });
+    const legacyOnClass = await User.countDocuments({
+      schoolClassId: cls._id,
+      enterpriseId: ent._id,
+      role: 'user',
+    });
+    if (enrollCount > 0 || legacyOnClass > 0) {
+      return next(new AppError('Remove all students from this class before deleting it.', 400));
+    }
+
+    const gid = cls.chatGroup;
+    const teacherId = cls.teacher;
+    if (gid) {
+      await GroupMessage.deleteMany({ group: gid });
+      await ChatModerationLog.deleteMany({ group: gid });
+      await GroupChatModeration.deleteMany({ group: gid });
+      await Group.findByIdAndDelete(gid);
+    }
+    await SchoolClass.findByIdAndDelete(cls._id);
+    if (teacherId) await delCache(`groups:${teacherId}`);
+    res.json({ message: 'Class deleted' });
   } catch (err) { next(err); }
 };
 
@@ -756,11 +883,113 @@ export const enterpriseListStudents = async (req, res, next) => {
     const ent = await Enterprise.findById(req.user.enterpriseId);
     if (!ent || ent.mode !== 'school') return next(new AppError('School mode only', 403));
 
-    const q = { enterpriseId: ent._id, role: 'user' };
-    if (req.query.classId) q.schoolClassId = req.query.classId;
+    await ensureSchoolChatInfrastructure(ent._id);
 
-    const students = await User.find(q).select('name email schoolClassId createdAt').populate('schoolClassId', 'name section').sort({ name: 1 }).lean();
+    if (req.query.classId) {
+      const cls = await SchoolClass.findOne({ _id: req.query.classId, enterprise: ent._id })
+        .select('name section')
+        .lean();
+      if (!cls) return next(new AppError('Class not found', 404));
+
+      const rows = await SchoolClassEnrollment.find({
+        schoolClass: req.query.classId,
+        enterprise: ent._id,
+      })
+        .populate('user', 'name email createdAt')
+        .sort({ createdAt: -1 })
+        .lean();
+
+      const students = rows
+        .filter((r) => r.user)
+        .map((r) => ({
+          _id: r.user._id,
+          name: r.user.name,
+          email: r.user.email,
+          createdAt: r.user.createdAt,
+          schoolClassId: { _id: cls._id, name: cls.name, section: cls.section },
+        }));
+      return res.json({ students });
+    }
+
+    const rows = await SchoolClassEnrollment.find({ enterprise: ent._id })
+      .populate('user', 'name email createdAt')
+      .populate('schoolClass', 'name section')
+      .lean();
+
+    const students = rows
+      .filter((r) => r.user && r.schoolClass)
+      .map((r) => ({
+        _id: r.user._id,
+        name: r.user.name,
+        email: r.user.email,
+        createdAt: r.user.createdAt,
+        schoolClassId: r.schoolClass,
+      }));
+    students.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     res.json({ students });
+  } catch (err) { next(err); }
+};
+
+export const enterpriseUpdateStudent = async (req, res, next) => {
+  try {
+    if (!['instructor', 'admin', 'principal'].includes(req.user.role)) return next(new AppError('Forbidden', 403));
+    if (!req.user.enterpriseId) return next(new AppError('No enterprise', 403));
+    const ent = await Enterprise.findById(req.user.enterpriseId);
+    if (!ent || ent.mode !== 'school') return next(new AppError('School mode only', 403));
+
+    const target = await User.findById(req.params.userId);
+    if (!target || target.role !== 'user') return next(new AppError('Student not found', 404));
+    if (target.enterpriseId?.toString() !== ent._id.toString()) {
+      return next(new AppError('Student not in this organization', 403));
+    }
+
+    const { name, email } = req.body;
+    if (name === undefined && email === undefined) {
+      return next(new AppError('Provide name and/or email to update', 400));
+    }
+    if (name !== undefined) {
+      const t = String(name).trim();
+      if (!t) return next(new AppError('Name is required', 400));
+      target.name = t;
+    }
+    if (email !== undefined) {
+      const em = String(email).toLowerCase().trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) return next(new AppError('Invalid email', 400));
+      const conflict = await User.findOne({ email: em, _id: { $ne: target._id } });
+      if (conflict) return next(new AppError('Another account already uses this email', 409));
+      target.email = em;
+    }
+    await target.save({ validateBeforeSave: false });
+    res.json({ student: { id: target._id, name: target.name, email: target.email } });
+  } catch (err) { next(err); }
+};
+
+export const enterpriseDeleteStudent = async (req, res, next) => {
+  try {
+    if (!['instructor', 'admin', 'principal'].includes(req.user.role)) return next(new AppError('Forbidden', 403));
+    if (!req.user.enterpriseId) return next(new AppError('No enterprise', 403));
+    const ent = await Enterprise.findById(req.user.enterpriseId);
+    if (!ent || ent.mode !== 'school') return next(new AppError('School mode only', 403));
+
+    const target = await User.findById(req.params.userId);
+    if (!target || target.role !== 'user') return next(new AppError('Student not found', 404));
+    if (target.enterpriseId?.toString() !== ent._id.toString()) {
+      return next(new AppError('Student not in this organization', 403));
+    }
+
+    const enrollCount = await SchoolClassEnrollment.countDocuments({ user: target._id, enterprise: ent._id });
+    if (enrollCount > 0) {
+      return next(new AppError('This student is still enrolled in one or more classes. Remove them from all classes before deleting their account.', 400));
+    }
+    if (target.schoolClassId) {
+      const legacyCls = await SchoolClass.findOne({ _id: target.schoolClassId, enterprise: ent._id }).select('_id').lean();
+      if (legacyCls) {
+        return next(new AppError('This student is still linked to a class roster. Remove them from all classes before deleting their account.', 400));
+      }
+    }
+
+    await User.findByIdAndDelete(target._id);
+    res.json({ message: 'Student removed' });
   } catch (err) { next(err); }
 };
 
@@ -824,18 +1053,89 @@ export const enterpriseInviteStudent = async (req, res, next) => {
     if (!cls) return next(new AppError('Class not found', 404));
 
     const em = email.toLowerCase().trim();
-    const existing = await User.findOne({ email: em });
-    if (existing) return next(new AppError('An account with this email already exists', 409));
+    const existing = await findUserByEmailCaseInsensitive(em);
+
+    if (existing) {
+      if (existing.role !== 'user') {
+        return next(new AppError('This account cannot be enrolled as a student in this class.', 400));
+      }
+      if (existing.enterpriseId && existing.enterpriseId.toString() !== ent._id.toString()) {
+        return next(new AppError('This student belongs to a different organization.', 403));
+      }
+      const dup = await SchoolClassEnrollment.exists({ schoolClass: cls._id, user: existing._id });
+      if (dup) return next(new AppError('This student is already enrolled in this class.', 409));
+
+      if (!existing.enterpriseId) {
+        existing.enterpriseId = ent._id;
+        if (existing.plan === 'free') existing.plan = 'enterprise';
+        await existing.save({ validateBeforeSave: false });
+      }
+      if (!existing.schoolClassId) {
+        existing.schoolClassId = cls._id;
+      }
+      if (existing.email !== em) {
+        existing.email = em;
+      }
+      await existing.save({ validateBeforeSave: false });
+
+      await enrollUserInSchoolClass(existing, cls._id, ent._id);
+
+      return res.status(200).json({
+        student: {
+          id: existing._id,
+          name: existing.name,
+          email: existing.email,
+          schoolClassId: cls._id,
+        },
+        reusedAccount: true,
+        note: 'Existing account linked to this class. No duplicate user created.',
+      });
+    }
 
     const password = crypto.randomBytes(12).toString('hex');
-    const student = await User.create({
-      name: name.trim(),
-      email: em,
-      password,
-      role: 'user',
-      enterpriseId: ent._id,
-      schoolClassId: cls._id,
-    });
+    let student;
+    try {
+      student = await User.create({
+        name: name.trim(),
+        email: em,
+        password,
+        role: 'user',
+        enterpriseId: ent._id,
+        schoolClassId: cls._id,
+        plan: 'enterprise',
+      });
+    } catch (createErr) {
+      if (createErr?.code !== 11000) throw createErr;
+      const again = await findUserByEmailCaseInsensitive(em);
+      if (!again || again.role !== 'user') {
+        return next(new AppError('Unable to link student account. Try again or use a different email.', 409));
+      }
+      if (again.enterpriseId && again.enterpriseId.toString() !== ent._id.toString()) {
+        return next(new AppError('This student belongs to a different organization.', 403));
+      }
+      const dupRace = await SchoolClassEnrollment.exists({ schoolClass: cls._id, user: again._id });
+      if (dupRace) return next(new AppError('This student is already enrolled in this class.', 409));
+      if (!again.enterpriseId) {
+        again.enterpriseId = ent._id;
+        if (again.plan === 'free') again.plan = 'enterprise';
+      }
+      if (!again.schoolClassId) again.schoolClassId = cls._id;
+      if (again.email !== em) again.email = em;
+      await again.save({ validateBeforeSave: false });
+      await enrollUserInSchoolClass(again, cls._id, ent._id);
+      return res.status(200).json({
+        student: {
+          id: again._id,
+          name: again.name,
+          email: again.email,
+          schoolClassId: cls._id,
+        },
+        reusedAccount: true,
+        note: 'Existing account linked to this class. No duplicate user created.',
+      });
+    }
+
+    await enrollUserInSchoolClass(student, cls._id, ent._id);
 
     res.status(201).json({
       student: {
@@ -861,51 +1161,166 @@ export const enterpriseBulkInviteStudents = async (req, res, next) => {
     const classIds = [...new Set(rows.map((r) => r.schoolClassId).filter(Boolean))];
     const classes = await SchoolClass.find({ _id: { $in: classIds }, enterprise: ent._id }).select('_id');
     const validClassIds = new Set(classes.map((c) => c._id.toString()));
-    const emails = rows.map((r) => String(r.email || '').toLowerCase().trim()).filter(Boolean);
-    const existingUsers = await User.find({ email: { $in: emails } }).select('email').lean();
-    const existingEmailSet = new Set(existingUsers.map((u) => u.email.toLowerCase()));
 
     const errors = [];
-    const valid = [];
-    rows.forEach((row, idx) => {
+    let created = 0;
+    let enrolledExisting = 0;
+
+    for (let idx = 0; idx < rows.length; idx++) {
+      const row = rows[idx];
       const name = String(row.name || '').trim();
       const email = String(row.email || '').toLowerCase().trim();
       const schoolClassId = String(row.schoolClassId || '');
       if (!name || !email || !schoolClassId) {
         errors.push({ row: idx + 1, email, message: 'name, email, and schoolClassId are required' });
-        return;
+        continue;
       }
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         errors.push({ row: idx + 1, email, message: 'invalid email format' });
-        return;
+        continue;
       }
       if (!validClassIds.has(schoolClassId)) {
         errors.push({ row: idx + 1, email, message: 'class not found in enterprise' });
-        return;
+        continue;
       }
-      if (existingEmailSet.has(email)) {
-        errors.push({ row: idx + 1, email, message: 'email already exists' });
-        return;
-      }
-      valid.push({ name, email, schoolClassId });
-      existingEmailSet.add(email);
-    });
 
-    const docs = valid.map((v) => ({
-      name: v.name,
-      email: v.email,
-      password: crypto.randomBytes(12).toString('hex'),
-      role: 'user',
-      enterpriseId: ent._id,
-      schoolClassId: v.schoolClassId,
-    }));
-    if (docs.length) await User.insertMany(docs, { ordered: false });
+      const cls = await SchoolClass.findOne({ _id: schoolClassId, enterprise: ent._id });
+      if (!cls) {
+        errors.push({ row: idx + 1, email, message: 'class not found' });
+        continue;
+      }
+
+      const existing = await findUserByEmailCaseInsensitive(email);
+      if (existing) {
+        if (existing.role !== 'user') {
+          errors.push({ row: idx + 1, email, message: 'account is not a student account' });
+          continue;
+        }
+        if (existing.enterpriseId && existing.enterpriseId.toString() !== ent._id.toString()) {
+          errors.push({ row: idx + 1, email, message: 'belongs to another organization' });
+          continue;
+        }
+        const dup = await SchoolClassEnrollment.exists({ schoolClass: cls._id, user: existing._id });
+        if (dup) {
+          errors.push({ row: idx + 1, email, message: 'already enrolled in this class' });
+          continue;
+        }
+        try {
+          if (!existing.enterpriseId) {
+            existing.enterpriseId = ent._id;
+            if (existing.plan === 'free') existing.plan = 'enterprise';
+          }
+          if (!existing.schoolClassId) existing.schoolClassId = cls._id;
+          await existing.save({ validateBeforeSave: false });
+          await enrollUserInSchoolClass(existing, cls._id, ent._id);
+          enrolledExisting++;
+        } catch (e) {
+          errors.push({ row: idx + 1, email, message: e.message || 'enroll failed' });
+        }
+        continue;
+      }
+
+      try {
+        const password = crypto.randomBytes(12).toString('hex');
+        const student = await User.create({
+          name,
+          email,
+          password,
+          role: 'user',
+          enterpriseId: ent._id,
+          schoolClassId: cls._id,
+          plan: 'enterprise',
+        });
+        await enrollUserInSchoolClass(student, cls._id, ent._id);
+        created++;
+      } catch (e) {
+        errors.push({ row: idx + 1, email, message: e.message || 'create failed' });
+      }
+    }
 
     res.status(201).json({
-      created: docs.length,
+      created,
+      enrolledExisting,
       failed: errors.length,
       errors,
-      message: `Created ${docs.length} students${errors.length ? `, ${errors.length} failed` : ''}.`,
+      message: `Created ${created} new student(s), linked ${enrolledExisting} existing account(s)${errors.length ? `, ${errors.length} row(s) failed` : ''}.`,
     });
+  } catch (err) { next(err); }
+};
+
+/** Resolve shadow Group id for class chat (same stack as batch chat). */
+export const enterpriseGetClassChatGroup = async (req, res, next) => {
+  try {
+    if (!req.user.enterpriseId) return next(new AppError('No enterprise', 403));
+    const ent = await Enterprise.findById(req.user.enterpriseId);
+    if (!ent || ent.mode !== 'school') return next(new AppError('School mode only', 403));
+
+    const cls = await SchoolClass.findOne({ _id: req.params.classId, enterprise: ent._id });
+    if (!cls) return next(new AppError('Class not found', 404));
+
+    const isAssignedTeacher = cls.teacher?.toString() === req.user._id.toString();
+
+    if (req.user.role === 'instructor' || req.user.role === 'admin') {
+      if (!isAssignedTeacher) return next(new AppError('Only the teacher assigned to this class can open class chat.', 403));
+    } else if (req.user.role === 'user') {
+      if (!(await userHasSchoolClassAccess(req.user, cls))) {
+        return next(new AppError('You are not enrolled in this class.', 403));
+      }
+    } else {
+      return next(new AppError('Forbidden', 403));
+    }
+
+    await ensureSchoolClassChatGroup(cls);
+    const fresh = await SchoolClass.findById(cls._id);
+    res.json({ groupId: fresh.chatGroup });
+  } catch (err) { next(err); }
+};
+
+/** Student: classes they are enrolled in with chat group ids. */
+export const enterpriseListMySchoolChats = async (req, res, next) => {
+  try {
+    if (!req.user.enterpriseId) return next(new AppError('No enterprise', 403));
+    const ent = await Enterprise.findById(req.user.enterpriseId);
+    if (!ent || ent.mode !== 'school') return next(new AppError('School mode only', 403));
+    if (req.user.role !== 'user') return next(new AppError('Forbidden', 403));
+
+    await ensureSchoolChatInfrastructure(ent._id);
+
+    let enrollmentRows = await SchoolClassEnrollment.find({
+      user: req.user._id,
+      enterprise: ent._id,
+    }).lean();
+
+    const classIdSet = new Set(enrollmentRows.map((r) => r.schoolClass.toString()));
+    if (req.user.schoolClassId && !classIdSet.has(req.user.schoolClassId.toString())) {
+      const legacyCls = await SchoolClass.findOne({
+        _id: req.user.schoolClassId,
+        enterprise: ent._id,
+      }).select('_id').lean();
+      if (legacyCls) enrollmentRows = [...enrollmentRows, { schoolClass: legacyCls._id }];
+    }
+
+    const classIds = [...new Set(enrollmentRows.map((r) => r.schoolClass.toString()))];
+    const classes = await SchoolClass.find({ _id: { $in: classIds }, enterprise: ent._id }).lean();
+
+    const out = [];
+    for (const c of classes) {
+      if (!c.teacher) continue;
+      try {
+        await ensureSchoolClassChatGroup(c);
+      } catch {
+        continue;
+      }
+      const fresh = await SchoolClass.findById(c._id);
+      if (!fresh?.chatGroup) continue;
+      out.push({
+        classId: fresh._id,
+        name: fresh.name,
+        section: fresh.section || '',
+        chatGroupId: fresh.chatGroup,
+      });
+    }
+    out.sort((a, b) => `${a.name} ${a.section}`.localeCompare(`${b.name} ${b.section}`));
+    res.json({ classes: out });
   } catch (err) { next(err); }
 };

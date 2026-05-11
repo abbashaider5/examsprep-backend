@@ -176,6 +176,11 @@ export async function deleteGroup(req, res) {
   try {
     const group = await Group.findById(req.params.id);
     if (!group) return res.status(404).json({ message: 'Group not found' });
+    if (group.kind === 'school_class') {
+      return res.status(400).json({
+        message: 'School class chats cannot be deleted from here. They stay with the class.',
+      });
+    }
     if (group.instructor.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({ message: 'Not your group' });
     }
@@ -194,6 +199,11 @@ export async function inviteMember(req, res) {
   try {
     const group = await Group.findById(req.params.id);
     if (!group) return res.status(404).json({ message: 'Group not found' });
+    if (group.kind === 'school_class') {
+      return res.status(400).json({
+        message: 'Class chat membership follows school enrollment. Add students from the Students page.',
+      });
+    }
     if (group.instructor.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({ message: 'Not your group' });
     }
@@ -392,6 +402,9 @@ export async function removeMember(req, res) {
   try {
     const group = await Group.findById(req.params.id);
     if (!group) return res.status(404).json({ message: 'Group not found' });
+    if (group.kind === 'school_class') {
+      return res.status(400).json({ message: 'Manage class roster from the school Students page, not from chat.' });
+    }
     if (group.instructor.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({ message: 'Not your group' });
     }
@@ -409,6 +422,11 @@ export async function leaveGroup(req, res) {
   try {
     const group = await Group.findById(req.params.id);
     if (!group) return res.status(404).json({ message: 'Group not found' });
+    if (group.kind === 'school_class') {
+      return res.status(400).json({
+        message: 'You cannot leave a class chat here. Membership follows your class enrollment.',
+      });
+    }
     group.members = group.members.filter(m => m.toString() !== req.user._id.toString());
     await group.save();
 
@@ -790,6 +808,11 @@ export async function bulkInviteMembers(req, res) {
   try {
     const group = await Group.findById(req.params.id);
     if (!group) return res.status(404).json({ message: 'Group not found' });
+    if (group.kind === 'school_class') {
+      return res.status(400).json({
+        message: 'Use school student enrollment to add members to a class chat.',
+      });
+    }
     if (group.instructor.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
       return res.status(403).json({ message: 'Not your group' });
     }

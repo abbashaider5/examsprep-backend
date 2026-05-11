@@ -6,6 +6,10 @@ const sharedExamSchema = new mongoose.Schema({
 }, { _id: false });
 
 const groupSchema = new mongoose.Schema({
+  /** batch = instructor-created study group; school_class = enterprise school class chat room */
+  kind: { type: String, enum: ['batch', 'school_class'], default: 'batch', index: true },
+  /** When kind is school_class, links to the SchoolClass row. */
+  schoolClass: { type: mongoose.Schema.Types.ObjectId, ref: 'SchoolClass', default: null, index: true },
   name:        { type: String, required: true, trim: true, maxlength: 80 },
   description: { type: String, trim: true, maxlength: 300, default: '' },
   /** When set, batch belongs to an enterprise (institute mode). */

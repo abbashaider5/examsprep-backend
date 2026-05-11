@@ -20,6 +20,7 @@ export const isCloudinaryConfigured = () => {
  * Upload a base64 data URI to Cloudinary.
  * Returns the secure URL or null if Cloudinary is not configured or upload fails.
  */
+/** @returns {{ secureUrl: string, publicId: string } | null} */
 export const uploadScreenshot = async (base64DataUri, folder = 'examprep/screenshots') => {
   if (!isCloudinaryConfigured()) return null;
   try {
@@ -37,10 +38,19 @@ export const uploadScreenshot = async (base64DataUri, folder = 'examprep/screens
       height: 480,
       crop: 'limit',
     });
-    return result.secure_url;
+    return { secureUrl: result.secure_url, publicId: result.public_id };
   } catch (err) {
     logger.error(`[Cloudinary] Upload failed: ${err.message}`);
     return null;
+  }
+};
+
+export const deleteCloudinaryScreenshot = async (publicId) => {
+  if (!isCloudinaryConfigured() || !publicId) return;
+  try {
+    await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
+  } catch (err) {
+    logger.error(`[Cloudinary] Screenshot delete failed for ${publicId}: ${err.message}`);
   }
 };
 

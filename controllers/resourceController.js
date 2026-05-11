@@ -7,6 +7,12 @@ import { deleteCloudinaryResource, uploadResourceFile } from '../services/cloudi
 import logger from '../utils/logger.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
 
+function canUseInstructorResourceApis(user) {
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+  return Boolean(user.isInstructor) || ['instructor', 'principal'].includes(user.role);
+}
+
 // Lazily import pdf-parse to avoid import-time test file issues
 const parsePDFBuffer = async (buffer) => {
   const { default: pdfParse } = await import('pdf-parse/lib/pdf-parse.js');
@@ -33,17 +39,17 @@ export const uploadResource = async (req, res, next) => {
     if (!title?.trim()) return next(new AppError('Title is required', 400));
 
     const isAdmin = req.user.role === 'admin';
-    const isInstructor = req.user.isInstructor || ['instructor', 'admin'].includes(req.user.role);
-    if (!isAdmin && !isInstructor) return next(new AppError('Not authorized', 403));
+    if (!isAdmin && !canUseInstructorResourceApis(req.user)) return next(new AppError('Not authorized', 403));
 
-    // For instructor uploads, verify group ownership
+    // Instructor uploads: optional groupId — when omitted, file is a personal library resource (e.g. exam creation / school mode).
     let group = null;
     if (!isAdmin) {
-      if (!groupId) return next(new AppError('groupId is required for instructor resources', 400));
-      group = await Group.findById(groupId);
-      if (!group) return next(new AppError('Group not found', 404));
-      if (group.instructor.toString() !== req.user._id.toString()) {
-        return next(new AppError('Not your group', 403));
+      if (groupId) {
+        group = await Group.findById(groupId);
+        if (!group) return next(new AppError('Group not found', 404));
+        if (group.instructor.toString() !== req.user._id.toString()) {
+          return next(new AppError('Not your group', 403));
+        }
       }
     }
 
@@ -76,6 +82,7 @@ export const uploadResource = async (req, res, next) => {
 // ── Get admin-scoped resources (global; for instructors to use during exam creation) ──
 export const getAdminResources = async (req, res, next) => {
   try {
+    if (!canUseInstructorResourceApis(req.user)) return next(new AppError('Not authorized', 403));
     const key = 'resources:admin';
     const cached = await getCache(key);
     if (cached) return res.json(cached);
@@ -114,6 +121,7 @@ export const getGroupResources = async (req, res, next) => {
 // ── Get all resources uploaded by the current instructor (across all groups) ──
 export const getMyResources = async (req, res, next) => {
   try {
+    if (!canUseInstructorResourceApis(req.user)) return next(new AppError('Not authorized', 403));
     const key = `resources:mine:${req.user._id}`;
     const cached = await getCache(key);
     if (cached) return res.json(cached);
