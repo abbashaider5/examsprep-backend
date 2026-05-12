@@ -32,6 +32,8 @@ const examSchema = new mongoose.Schema({
   difficulty: { type: String, enum: ['easy', 'medium', 'hard'], default: 'medium' },
   examType:   { type: String, enum: ['mcq', 'descriptive', 'mixed', 'coding'], default: 'mcq' },
   topics:     [String],
+  /** When set, regenerate flows can stay grounded in the same uploaded material */
+  sourceResource: { type: mongoose.Schema.Types.ObjectId, ref: 'Resource', default: null, index: true },
   questions:  [questionSchema],
   createdBy:  { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   proctored:  { type: Boolean, default: false },

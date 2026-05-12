@@ -3,7 +3,10 @@ import http from 'http';
 import { AppError } from '../middleware/errorHandler.js';
 import Group from '../models/Group.js';
 import Resource from '../models/Resource.js';
+import ResourceChunk from '../models/ResourceChunk.js';
 import { deleteCloudinaryResource, uploadResourceFile } from '../services/cloudinaryService.js';
+import { enqueueResourceProcessing } from '../services/resourceProcessingService.js';
+import { extractTextFromResourceBuffer } from '../services/resourceTextExtraction.js';
 import logger from '../utils/logger.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
 
@@ -12,13 +15,6 @@ function canUseInstructorResourceApis(user) {
   if (user.role === 'admin') return true;
   return Boolean(user.isInstructor) || ['instructor', 'principal'].includes(user.role);
 }
-
-// Lazily import pdf-parse to avoid import-time test file issues
-const parsePDFBuffer = async (buffer) => {
-  const { default: pdfParse } = await import('pdf-parse/lib/pdf-parse.js');
-  const data = await pdfParse(buffer);
-  return { text: data.text?.trim() || '', pages: data.numpages || 0 };
-};
 
 // Download a file from a URL and return its buffer
 const downloadBuffer = (url) => new Promise((resolve, reject) => {
@@ -35,8 +31,9 @@ const downloadBuffer = (url) => new Promise((resolve, reject) => {
 export const uploadResource = async (req, res, next) => {
   try {
     if (!req.file) return next(new AppError('No file uploaded', 400));
-    const { title, groupId } = req.body;
+    const { title, groupId, subject: subjectRaw } = req.body;
     if (!title?.trim()) return next(new AppError('Title is required', 400));
+    const subject = typeof subjectRaw === 'string' ? subjectRaw.trim().slice(0, 200) : '';
 
     const isAdmin = req.user.role === 'admin';
     if (!isAdmin && !canUseInstructorResourceApis(req.user)) return next(new AppError('Not authorized', 403));
@@ -65,11 +62,19 @@ export const uploadResource = async (req, res, next) => {
       cloudinaryUrl: uploaded.url,
       cloudinaryPublicId: uploaded.publicId,
       uploadedBy: req.user._id,
+      enterpriseId: req.user.enterpriseId || null,
+      subject,
       scope: isAdmin ? 'admin' : 'instructor',
       group: group ? group._id : null,
+      processingStatus: 'processing',
+      processingErrorCode: '',
+      processingErrorMessage: '',
+      chunkCount: 0,
     });
 
     res.status(201).json({ resource });
+
+    enqueueResourceProcessing(resource._id);
 
     // Invalidate caches after response is sent
     const cacheKeys = [`resources:mine:${req.user._id}`];
@@ -148,6 +153,7 @@ export const deleteResource = async (req, res, next) => {
     if (resource.cloudinaryPublicId) {
       await deleteCloudinaryResource(resource.cloudinaryPublicId);
     }
+    await ResourceChunk.deleteMany({ resource: resource._id });
     await resource.deleteOne();
 
     // Invalidate caches
@@ -182,29 +188,88 @@ export const getResourceText = async (req, res, next) => {
     // Download file from Cloudinary and parse text on demand
     const buffer = await downloadBuffer(resource.cloudinaryUrl);
 
-    const ext = resource.originalName?.split('.').pop()?.toLowerCase() || 'pdf';
     let text = '';
     let pages = 0;
-
-    if (ext === 'pdf') {
-      try {
-        const parsed = await parsePDFBuffer(buffer);
-        text = parsed.text.slice(0, 60000); // cap at 60k chars for AI context
-        pages = parsed.pages;
-      } catch (parseErr) {
-        logger.warn(`[Resource] PDF parse failed for ${resource._id}: ${parseErr.message}`);
-        return next(new AppError('Could not read text from this PDF. Please ensure it is a text-based PDF.', 422));
+    try {
+      const extracted = await extractTextFromResourceBuffer(buffer, resource.originalName, resource.mimetype);
+      text = (extracted.text || '').slice(0, 60000);
+      pages = extracted.pages || 0;
+    } catch (e) {
+      if (e.code === 'LEGACY_PPT') {
+        return next(new AppError('Legacy .ppt is not supported. Save as .pptx and upload again.', 422));
       }
-    } else {
-      // For DOC/DOCX, we don't have a parser — return a helpful message
-      return next(new AppError('Text extraction is only supported for PDF files. Please re-upload as PDF.', 422));
+      logger.warn(`[Resource] Text extract failed for ${resource._id}: ${e.message}`);
+      return next(new AppError('Could not read text from this file.', 422));
     }
 
     if (!text || text.length < 20) {
-      return next(new AppError('This PDF does not contain readable text. Please upload a text-based PDF.', 422));
+      return next(new AppError('This file does not contain enough readable text.', 422));
     }
 
     res.json({ text, title: resource.title, pages, chars: text.length });
+  } catch (err) { next(err); }
+};
+
+// ── Processing status (for AI indexing UI + polling) ──────────────────────
+export const getResourceProcessingStatus = async (req, res, next) => {
+  try {
+    const resource = await Resource.findById(req.params.id).select(
+      'title processingStatus processingErrorCode processingErrorMessage chunkCount extractedCharCount structureOutline processedAt scope uploadedBy embeddingModel pages',
+    );
+    if (!resource) return next(new AppError('Resource not found', 404));
+
+    if (resource.scope === 'admin') {
+      if (!canUseInstructorResourceApis(req.user)) return next(new AppError('Not authorized', 403));
+    } else {
+      const isOwner = resource.uploadedBy.toString() === req.user._id.toString();
+      if (!isOwner && req.user.role !== 'admin') return next(new AppError('Not authorized', 403));
+    }
+
+    const processingStatus = resource.processingStatus || 'ready';
+
+    res.json({
+      processingStatus,
+      chunkCount: resource.chunkCount || 0,
+      extractedCharCount: resource.extractedCharCount || 0,
+      pages: resource.pages || 0,
+      embeddingModel: resource.embeddingModel || '',
+      processedAt: resource.processedAt,
+      structureOutline: (resource.structureOutline || []).slice(0, 40),
+      error: resource.processingStatus === 'failed' ? {
+        code: resource.processingErrorCode || 'FAILED',
+        message: resource.processingErrorMessage || 'Processing failed.',
+      } : null,
+    });
+  } catch (err) { next(err); }
+};
+
+// ── Retry failed / stale processing ────────────────────────────────────────
+export const retryResourceProcessing = async (req, res, next) => {
+  try {
+    const resource = await Resource.findById(req.params.id);
+    if (!resource) return next(new AppError('Resource not found', 404));
+    const isOwner = resource.uploadedBy.toString() === req.user._id.toString();
+    if (!isOwner && req.user.role !== 'admin') {
+      return next(new AppError('Not authorized', 403));
+    }
+    if (!resource.cloudinaryUrl) {
+      return next(new AppError('Resource file not available', 404));
+    }
+
+    await Resource.findByIdAndUpdate(resource._id, {
+      processingStatus: 'processing',
+      processingErrorCode: '',
+      processingErrorMessage: '',
+    });
+
+    enqueueResourceProcessing(resource._id);
+
+    const cacheKeys = [`resources:mine:${resource.uploadedBy}`];
+    if (resource.group) cacheKeys.push(`resources:group:${resource.group}`);
+    if (resource.scope === 'admin') cacheKeys.push('resources:admin');
+    await delCache(...cacheKeys);
+
+    res.json({ ok: true, processingStatus: 'processing' });
   } catch (err) { next(err); }
 };
 

@@ -6,6 +6,9 @@ import ExamInvite from '../models/ExamInvite.js';
 import Group from '../models/Group.js';
 import Enterprise from '../models/Enterprise.js';
 import Resource from '../models/Resource.js';
+import ResourceChunk from '../models/ResourceChunk.js';
+import { retrieveGroundingContext } from '../services/resourceRetrievalService.js';
+import { enqueueResourceProcessing } from '../services/resourceProcessingService.js';
 import Screenshot from '../models/Screenshot.js';
 import UserExamShuffle from '../models/UserExamShuffle.js';
 import {
@@ -16,9 +19,9 @@ import {
 } from '../utils/examShuffleRuntime.js';
 import crypto from 'crypto';
 import {
-    analyzeProctoringImage,
-    generateCodingQuestions, generateDescriptiveQuestions, generateMCQs,
-    generateQuestionsFromText, generateSingleQuestion,
+  analyzeProctoringImage,
+  generateCodingQuestions, generateDescriptiveQuestions, generateGroundedExamQuestions, generateMCQs,
+  generateQuestionsFromText, generateSingleQuestion,
 } from '../services/aiService.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
 import { buildInstructorExamReportData } from '../utils/instructorExamReportData.js';
@@ -91,22 +94,81 @@ export const createExam = async (req, res, next) => {
       return next(new AppError('Coding questions require an Enterprise plan.', 403));
     }
 
-    // Resolve context text — either passed directly or fetched from a resource
+    // Resolve resource-backed generation (RAG) or legacy full-document text
+    let sourceResourceId = null;
     let resolvedContextText = contextText || '';
-    if (!resolvedContextText && resourceId) {
-      const resource = await Resource.findById(resourceId).select('cloudinaryUrl title scope uploadedBy');
-      if (resource) {
-        // Access check: admin resources are open to all; instructor resources must be owned
-        const canAccess = resource.scope === 'admin' || resource.uploadedBy.toString() === user._id.toString() || user.role === 'admin';
-        if (canAccess && resource.cloudinaryUrl) {
-          try {
-            const buf = await downloadBuffer(resource.cloudinaryUrl);
-            resolvedContextText = (await parsePDFBuffer(buf)).slice(0, 60000);
-          } catch (fetchErr) {
-            // Non-fatal: fall back to regular AI generation
-            logger.warn('[createExam] Resource fetch/parse failed: ' + fetchErr.message);
-          }
+
+    if (resourceId && !(enableCoding || examType === 'coding')) {
+      const resource = await Resource.findById(resourceId).select(
+        'cloudinaryUrl title scope uploadedBy subject processingStatus processingErrorMessage chunkCount mimetype originalName',
+      );
+      if (!resource) {
+        return next(new AppError('Resource not found', 404));
+      }
+      const canAccess = resource.scope === 'admin'
+        || resource.uploadedBy.toString() === user._id.toString()
+        || user.role === 'admin';
+      if (!canAccess) {
+        return next(new AppError('Not authorized to use this resource', 403));
+      }
+
+      const st = resource.processingStatus;
+      if (st === 'processing' || st === 'uploading') {
+        return next(new AppError(
+          'This resource is still being read and indexed. Wait until AI processing finishes, then create your exam.',
+          409,
+        ));
+      }
+      if (st === 'failed') {
+        return next(new AppError(
+          resource.processingErrorMessage || 'This resource failed AI processing. Retry indexing or upload again.',
+          422,
+        ));
+      }
+
+      const indexed = (resource.chunkCount > 0)
+        || (await ResourceChunk.countDocuments({ resource: resource._id })) > 0;
+
+      if (indexed && st === 'ready') {
+        const { context } = await retrieveGroundingContext(resource._id, {
+          subject: subject || resource.subject || resource.title || 'General',
+          topics: topics || [],
+          maxChars: 16_000,
+          topK: 26,
+        });
+        if (!context || context.length < 50) {
+          return next(new AppError(
+            'Not enough indexed content could be retrieved from this resource. Try re-uploading or broadening topics.',
+            422,
+          ));
         }
+        sourceResourceId = resource._id;
+        resolvedContextText = `__RAG__:${context}`;
+      } else if (resource.cloudinaryUrl) {
+        // Legacy resources (no vector index yet): one-shot text extraction, then queue indexing for next time
+        try {
+          const buf = await downloadBuffer(resource.cloudinaryUrl);
+          const ext = resource.originalName?.split('.').pop()?.toLowerCase() || 'pdf';
+          let text = '';
+          if (ext === 'pdf' || (resource.mimetype || '').includes('pdf')) {
+            text = (await parsePDFBuffer(buf)).slice(0, 60000);
+          } else {
+            const { extractTextFromResourceBuffer } = await import('../services/resourceTextExtraction.js');
+            const ex = await extractTextFromResourceBuffer(buf, resource.originalName, resource.mimetype);
+            text = (ex.text || '').slice(0, 60000);
+          }
+          if (!text || text.length < 80) {
+            return next(new AppError('Could not read enough text from this resource. Try a text-based PDF or DOCX.', 422));
+          }
+          resolvedContextText = text;
+          sourceResourceId = resource._id;
+          enqueueResourceProcessing(resource._id);
+        } catch (fetchErr) {
+          logger.warn('[createExam] Resource fetch/parse failed: ' + fetchErr.message);
+          return next(new AppError('Could not read this resource file. Check the format or try again.', 422));
+        }
+      } else {
+        return next(new AppError('Resource file is not available.', 404));
       }
     }
 
@@ -127,15 +189,29 @@ export const createExam = async (req, res, next) => {
       return { mcqCount, descCount, pct };
     };
 
-    if (resolvedContextText) {
-      questions = await generateQuestionsFromText({
-        text: resolvedContextText, numQuestions: requestedQ, examType, difficulty, mixedMcqPercent,
-      });
-    } else if (enableCoding || examType === 'coding') {
+    const examTypeEff = enableCoding ? 'coding' : examType;
+    const RAG_PREFIX = '__RAG__:';
+
+    if (enableCoding || examTypeEff === 'coding') {
       questions = await generateCodingQuestions({ subject, difficulty, numQuestions: requestedQ, topics });
-    } else if (examType === 'descriptive') {
+    } else if (resolvedContextText.startsWith(RAG_PREFIX)) {
+      const ctx = resolvedContextText.slice(RAG_PREFIX.length);
+      questions = await generateGroundedExamQuestions({
+        context: ctx,
+        subject,
+        numQuestions: requestedQ,
+        examType: examTypeEff,
+        difficulty,
+        mixedMcqPercent,
+        topics: topics || [],
+      });
+    } else if (resolvedContextText) {
+      questions = await generateQuestionsFromText({
+        text: resolvedContextText, numQuestions: requestedQ, examType: examTypeEff, difficulty, mixedMcqPercent,
+      });
+    } else if (examTypeEff === 'descriptive') {
       questions = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: requestedQ, topics });
-    } else if (examType === 'mixed') {
+    } else if (examTypeEff === 'mixed') {
       const { mcqCount, descCount } = splitMixed(requestedQ, mixedMcqPercent);
       const [mcqs, desc] = await Promise.all([
         mcqCount > 0 ? generateMCQs({ subject, difficulty, numQuestions: mcqCount, topics }) : Promise.resolve([]),
@@ -180,6 +256,7 @@ export const createExam = async (req, res, next) => {
       showResultToUser:    showResultToUser   !== undefined ? Boolean(showResultToUser)   : true,
       showAnswersToUser:   showAnswersToUser  !== undefined ? Boolean(showAnswersToUser)  : true,
       expiryDate:          expiryDate ? new Date(expiryDate) : null,
+      sourceResource:      sourceResourceId || null,
     });
 
     user.examsCreatedThisMonth = used + usageMultiplier;
@@ -309,10 +386,84 @@ export const regenerateExam = async (req, res, next) => {
     const numQ       = Number(req.body.numQuestions) || exam.questions.length;
     const topics     = req.body.topics     || exam.topics;
     const enableCoding = req.body.enableCoding !== undefined ? Boolean(req.body.enableCoding) : exam.enableCoding;
+    const examTypeEff = enableCoding ? 'coding' : (exam.examType || 'mcq');
 
     let questions;
-    if (enableCoding) {
+
+    if (enableCoding || examTypeEff === 'coding') {
       questions = await generateCodingQuestions({ subject, difficulty, numQuestions: numQ, topics });
+    } else if (exam.sourceResource) {
+      const resDoc = await Resource.findById(exam.sourceResource).select('processingStatus chunkCount');
+      const st = resDoc?.processingStatus;
+      if (st === 'processing' || st === 'uploading') {
+        return next(new AppError('Resource is still being indexed. Try again shortly.', 409));
+      }
+      if (st === 'failed') {
+        return next(new AppError('Linked resource failed processing. Re-link a ready resource or remove source.', 422));
+      }
+      const indexed = (resDoc?.chunkCount > 0)
+        || (await ResourceChunk.countDocuments({ resource: exam.sourceResource })) > 0;
+      if (indexed && st === 'ready') {
+        const { context } = await retrieveGroundingContext(exam.sourceResource, {
+          subject,
+          topics: topics || [],
+          maxChars: 16_000,
+          topK: 26,
+        });
+        if (!context || context.length < 50) {
+          return next(new AppError('Could not retrieve enough content from the linked resource.', 422));
+        }
+        questions = await generateGroundedExamQuestions({
+          context,
+          subject,
+          numQuestions: numQ,
+          examType: examTypeEff,
+          difficulty,
+          mixedMcqPercent: req.body.mixedMcqPercent ?? 50,
+          topics: topics || [],
+        });
+      } else {
+        /* legacy exam + resource */
+        const resource = await Resource.findById(exam.sourceResource).select('cloudinaryUrl originalName mimetype');
+        if (!resource?.cloudinaryUrl) {
+          return next(new AppError('Linked resource file is missing.', 404));
+        }
+        const buf = await downloadBuffer(resource.cloudinaryUrl);
+        const ext = resource.originalName?.split('.').pop()?.toLowerCase() || 'pdf';
+        let text = '';
+        if (ext === 'pdf' || (resource.mimetype || '').includes('pdf')) {
+          text = (await parsePDFBuffer(buf)).slice(0, 60000);
+        } else {
+          const { extractTextFromResourceBuffer } = await import('../services/resourceTextExtraction.js');
+          const ex = await extractTextFromResourceBuffer(buf, resource.originalName, resource.mimetype);
+          text = (ex.text || '').slice(0, 60000);
+        }
+        if (!text || text.length < 40) {
+          return next(new AppError('Could not extract text from linked resource.', 422));
+        }
+        questions = await generateQuestionsFromText({
+          text,
+          numQuestions: numQ,
+          examType: examTypeEff,
+          difficulty,
+          mixedMcqPercent: req.body.mixedMcqPercent ?? 50,
+        });
+      }
+    } else if (examTypeEff === 'descriptive') {
+      questions = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: numQ, topics });
+    } else if (examTypeEff === 'mixed') {
+      const pct = req.body.mixedMcqPercent ?? 50;
+      let p = Number(pct);
+      if (!Number.isFinite(p)) p = 50;
+      p = Math.max(10, Math.min(90, Math.round(p)));
+      let mcqCount = numQ <= 1 ? (p >= 50 ? 1 : 0) : Math.max(1, Math.min(numQ - 1, Math.round((numQ * p) / 100)));
+      let descCount = numQ - mcqCount;
+      if (numQ <= 1) descCount = numQ - mcqCount;
+      const [mcqs, desc] = await Promise.all([
+        mcqCount > 0 ? generateMCQs({ subject, difficulty, numQuestions: mcqCount, topics }) : Promise.resolve([]),
+        descCount > 0 ? generateDescriptiveQuestions({ subject, difficulty, numQuestions: descCount, topics }) : Promise.resolve([]),
+      ]);
+      questions = [...mcqs, ...desc];
     } else {
       questions = await generateMCQs({ subject, difficulty, numQuestions: numQ, topics });
     }
@@ -352,12 +503,36 @@ export const regenerateQuestion = async (req, res, next) => {
     const targetQ = exam.questions[index];
     const qType = targetQ?.type || exam.examType || 'mcq';
 
+    let groundedContext = '';
+    let groundedMode = false;
+    if (exam.sourceResource && qType !== 'coding') {
+      const resDoc = await Resource.findById(exam.sourceResource).select('processingStatus chunkCount');
+      if (resDoc?.processingStatus === 'ready') {
+        const indexed = (resDoc.chunkCount > 0)
+          || (await ResourceChunk.countDocuments({ resource: exam.sourceResource })) > 0;
+        if (indexed) {
+          const { context } = await retrieveGroundingContext(exam.sourceResource, {
+            subject: exam.subject,
+            topics: exam.topics || [],
+            maxChars: 14_000,
+            topK: 22,
+          });
+          if (context && context.length > 50) {
+            groundedContext = context;
+            groundedMode = true;
+          }
+        }
+      }
+    }
+
     const newQuestion = await generateSingleQuestion({
       subject: exam.subject,
       difficulty: exam.difficulty,
       examType: qType,
       existingQuestions: existing,
       topic: targetQ?.topic,
+      contextText: groundedContext || undefined,
+      groundedMode,
     });
 
     exam.questions[index] = newQuestion;

@@ -4,7 +4,9 @@ import {
   deleteResource,
   getAdminResources, getGroupResources,
   getMyResources,
+  getResourceProcessingStatus,
   getResourceText,
+  retryResourceProcessing,
   uploadResource,
 } from '../controllers/resourceController.js';
 import { protect } from '../middleware/auth.js';
@@ -17,6 +19,9 @@ const upload = multer({
       'application/pdf',
       'application/msword',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'application/vnd.ms-powerpoint',
+      'text/plain',
     ];
     cb(null, allowed.includes(file.mimetype));
   },
@@ -29,6 +34,8 @@ router.post('/', upload.single('file'), uploadResource);
 router.get('/admin', getAdminResources);
 router.get('/mine', getMyResources);
 router.get('/group/:groupId', getGroupResources);
+router.get('/:id/processing-status', getResourceProcessingStatus);
+router.post('/:id/retry-processing', retryResourceProcessing);
 router.get('/:id/text', getResourceText);
 router.delete('/:id', deleteResource);
 

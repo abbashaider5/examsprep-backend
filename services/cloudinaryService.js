@@ -63,7 +63,14 @@ export const uploadResourceFile = async (buffer, originalName = 'resource', fold
   try {
     const base64 = buffer.toString('base64');
     const ext = originalName.split('.').pop()?.toLowerCase() || 'pdf';
-    const mimeMap = { pdf: 'application/pdf', doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
+    const mimeMap = {
+      pdf: 'application/pdf',
+      doc: 'application/msword',
+      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      ppt: 'application/vnd.ms-powerpoint',
+      pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      txt: 'text/plain',
+    };
     const mime = mimeMap[ext] || 'application/octet-stream';
     const dataUri = `data:${mime};base64,${base64}`;
     const safePublicId = `${Date.now()}_${originalName.replace(/[^a-z0-9._-]/gi, '_')}`;

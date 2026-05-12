@@ -227,7 +227,7 @@ Rules:
   }));
 };
 
-/** Generate questions from uploaded content text (PDF/doc) */
+/** Generate questions from uploaded content text (PDF/doc) — legacy full-document path */
 export const generateQuestionsFromText = async ({
   text, numQuestions, examType = 'mcq', difficulty = 'medium', mixedMcqPercent = 50,
 }) => {
@@ -250,6 +250,171 @@ export const generateQuestionsFromText = async ({
     return [...mcqs, ...desc];
   }
   return generateMCQsFromText({ text: truncated, numQuestions, difficulty, seed });
+};
+
+const GROUNDED_RULES = `MANDATORY CONSTRAINTS:
+- Use ONLY facts, definitions, examples, and terminology that appear in SOURCE SNIPPETS below.
+- Do NOT use outside knowledge, the open web, or information not explicitly supported by the snippets.
+- Do NOT hallucinate names, numbers, dates, formulas, or claims.
+- Every correct answer and every distractor must be consistent with the snippets (distractors may be subtle misunderstandings of the same material).
+- If the snippets do not support enough distinct, high-quality questions, return FEWER than requested — never invent filler questions.
+- Align difficulty with how deeply the snippets support reasoning vs recall.`;
+
+const generateMCQsFromGroundedSnippets = async ({ context, subject, numQuestions, difficulty, seed }) => {
+  const prompt = `You are an expert exam author for K-12 and higher-ed assessments.
+
+${GROUNDED_RULES}
+
+Difficulty level requested: ${difficulty}
+
+Course / subject label (for tone only, not as a knowledge source): "${subject}"
+
+SOURCE SNIPPETS (only source of truth):
+"""
+${context}
+"""
+
+Batch ID: ${seed}
+
+Return ONLY a valid JSON array with at most ${numQuestions} objects, no markdown:
+[
+  {
+    "question": "...",
+    "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
+    "correctAnswer": 0,
+    "explanation": "One sentence, citing which idea in the snippets the question tests",
+    "topic": "short label from snippet vocabulary"
+  }
+]
+
+Rules:
+- correctAnswer is 0-based index (0=A)
+- Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
+
+  const completion = await getGroq().chat.completions.create({
+    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.55,
+    max_tokens: 4096,
+  });
+
+  const t = completion.choices[0]?.message?.content?.trim();
+  let qs;
+  try {
+    qs = parseAiJsonArray(t);
+  } catch {
+    throw new Error('AI failed to generate grounded MCQ JSON');
+  }
+  if (!Array.isArray(qs) || qs.length === 0) throw new Error('No grounded questions generated');
+  return qs.map(q => ({
+    type: 'mcq',
+    question: q.question,
+    options: Array.isArray(q.options) ? q.options : [],
+    correctAnswer: Number(q.correctAnswer),
+    explanation: q.explanation || '',
+    topic: q.topic || subject,
+  }));
+};
+
+const generateDescriptiveFromGroundedSnippets = async ({ context, subject, numQuestions, difficulty, topics, seed }) => {
+  const topicText = topics?.length ? `Topic hints (stay within snippets): ${topics.join(', ')}.` : '';
+  const prompt = `You are an expert exam author.
+
+${GROUNDED_RULES}
+
+Difficulty: ${difficulty}
+${topicText}
+Course / subject label (tone only): "${subject}"
+
+SOURCE SNIPPETS:
+"""
+${context}
+"""
+
+Batch ID: ${seed}
+
+Return ONLY a valid JSON array with at most ${numQuestions} objects:
+[
+  {
+    "question": "...",
+    "modelAnswer": "Derived strictly from the snippets",
+    "keyPoints": ["...", "..."],
+    "explanation": "What this question checks in the material",
+    "topic": "short label"
+  }
+]
+
+Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
+
+  const completion = await getGroq().chat.completions.create({
+    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.55,
+    max_tokens: 4096,
+  });
+
+  const text = completion.choices[0]?.message?.content?.trim();
+  let questions;
+  try {
+    questions = parseAiJsonArray(text);
+  } catch {
+    throw new Error('AI failed to generate grounded descriptive JSON');
+  }
+  if (!Array.isArray(questions) || questions.length === 0) throw new Error('No grounded descriptive questions generated');
+
+  return questions.map(q => ({
+    type: 'descriptive',
+    question: q.question,
+    modelAnswer: q.modelAnswer || '',
+    keyPoints: Array.isArray(q.keyPoints) ? q.keyPoints : [],
+    explanation: q.explanation || '',
+    topic: q.topic || subject,
+    options: [],
+    correctAnswer: undefined,
+  }));
+};
+
+/**
+ * RAG-backed generation: `context` must be retrieval-composed snippets only.
+ */
+export const generateGroundedExamQuestions = async ({
+  context, subject, numQuestions, examType = 'mcq', difficulty = 'medium', mixedMcqPercent = 50, topics = [],
+}) => {
+  const ctx = (context || '').trim();
+  if (ctx.length < 40) throw new Error('Insufficient retrieved material for grounded generation.');
+
+  const subj = (subject || '').trim() || 'Uploaded study material';
+  const seed = Math.floor(Math.random() * 10000);
+
+  if (examType === 'descriptive') {
+    return generateDescriptiveFromGroundedSnippets({
+      context: ctx, subject: subj, numQuestions, difficulty, topics, seed,
+    });
+  }
+
+  if (examType === 'mixed') {
+    let pct = Number(mixedMcqPercent);
+    if (!Number.isFinite(pct)) pct = 50;
+    pct = Math.max(10, Math.min(90, Math.round(pct)));
+    let mcqCount = numQuestions <= 1
+      ? (pct >= 50 ? 1 : 0)
+      : Math.max(1, Math.min(numQuestions - 1, Math.round((numQuestions * pct) / 100)));
+    let descCount = numQuestions - mcqCount;
+    if (numQuestions <= 1) descCount = numQuestions - mcqCount;
+    const [mcqs, desc] = await Promise.all([
+      mcqCount > 0 ? generateMCQsFromGroundedSnippets({
+        context: ctx, subject: subj, numQuestions: mcqCount, difficulty, seed: seed + 1,
+      }) : Promise.resolve([]),
+      descCount > 0 ? generateDescriptiveFromGroundedSnippets({
+        context: ctx, subject: subj, numQuestions: descCount, difficulty, topics, seed: seed + 2,
+      }) : Promise.resolve([]),
+    ]);
+    return [...mcqs, ...desc];
+  }
+
+  return generateMCQsFromGroundedSnippets({
+    context: ctx, subject: subj, numQuestions, difficulty, seed,
+  });
 };
 
 const generateMCQsFromText = async ({ text, numQuestions, difficulty, seed }) => {
@@ -304,14 +469,24 @@ Rules:
 };
 
 /** Regenerate a single question (replace one in the array) */
-export const generateSingleQuestion = async ({ subject, difficulty, examType = 'mcq', existingQuestions = [], topic, contextText }) => {
+export const generateSingleQuestion = async ({
+  subject, difficulty, examType = 'mcq', existingQuestions = [], topic, contextText, groundedMode = false,
+}) => {
   const existing = existingQuestions.slice(0, 5).map(q => q.question).join('\n- ');
   const avoidText = existing ? `\nDo NOT generate a question similar to these:\n- ${existing}` : '';
-  const contextSection = contextText ? `\n\nBase your question on this content:\n"""\n${contextText.slice(0, 3000)}\n"""` : '';
+  const ctxCap = groundedMode ? 14_000 : 3000;
+  const contextSection = contextText ? `\n\nBase your question on this content:\n"""\n${contextText.slice(0, ctxCap)}\n"""` : '';
   const topicHint = topic ? ` The question should be about "${topic}".` : '';
   const seed = Math.floor(Math.random() * 10000);
 
   if (examType === 'descriptive') {
+    if (groundedMode && contextText?.trim()) {
+      const qs = await generateDescriptiveFromGroundedSnippets({
+        subject, numQuestions: 1, difficulty, topics: topic ? [topic] : [], seed,
+        context: contextText.slice(0, ctxCap),
+      });
+      return qs[0];
+    }
     const qs = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: 1, topics: topic ? [topic] : [], contextText });
     return qs[0];
   }
@@ -320,7 +495,18 @@ export const generateSingleQuestion = async ({ subject, difficulty, examType = '
     return qs[0];
   }
 
-  // MCQ
+  if (groundedMode && contextText?.trim()) {
+    const qs = await generateMCQsFromGroundedSnippets({
+      context: contextText.slice(0, ctxCap),
+      subject,
+      numQuestions: 1,
+      difficulty,
+      seed,
+    });
+    return qs[0];
+  }
+
+  // MCQ (generic)
   const prompt = `Generate exactly 1 unique MCQ for subject "${subject}", difficulty "${difficulty}".${topicHint}${avoidText}${contextSection}
 Batch ID: ${seed}
 
