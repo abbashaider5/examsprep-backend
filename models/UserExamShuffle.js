@@ -10,6 +10,8 @@ const userExamShuffleSchema = new mongoose.Schema(
     questionOrder: [{ type: Number }],
     /** Per display index: option permutation for MCQ, or null */
     optionPermutations: [{ type: mongoose.Schema.Types.Mixed }],
+    /** Per display question index: secure audio token issues (replay enforcement) */
+    audioPlayCounts: { type: mongoose.Schema.Types.Mixed, default: {} },
   },
   { timestamps: true }
 );

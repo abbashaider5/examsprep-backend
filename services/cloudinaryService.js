@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { v2 as cloudinary } from 'cloudinary';
 import logger from '../utils/logger.js';
 
@@ -172,6 +173,48 @@ export const uploadProfileImage = async (buffer, mimetype, originalName = 'avata
     return result.secure_url;
   } catch (err) {
     logger.error(`[Cloudinary] Profile image upload failed: ${err.message}`);
+    return null;
+  }
+};
+
+/**
+ * Upload exam narration audio (authenticated — use signed URLs for playback).
+ * @returns {{ publicId: string } | null}
+ */
+export const uploadAuthenticatedExamAudio = async (buffer, mimetype = 'audio/wav') => {
+  if (!isCloudinaryConfigured() || !buffer) return null;
+  try {
+    const base64 = buffer.toString('base64');
+    const dataUri = `data:${mimetype || 'application/octet-stream'};base64,${base64}`;
+    const suffix = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const publicId = `examprep/exam-audio/${Date.now()}_${suffix}`;
+    const result = await cloudinary.uploader.upload(dataUri, {
+      resource_type: 'video',
+      type: 'authenticated',
+      public_id: publicId,
+    });
+    return { publicId: result.public_id };
+  } catch (err) {
+    logger.error(`[Cloudinary] Exam audio upload failed: ${err.message}`);
+    return null;
+  }
+};
+
+/** Signed short-lived URL for authenticated audio on Cloudinary */
+export const signedAuthenticatedMediaUrl = (publicId, ttlSec = 120) => {
+  configure();
+  if (!publicId || !_configured) return null;
+  try {
+    const expiresAt = Math.floor(Date.now() / 1000) + Math.max(30, Math.min(3600, ttlSec));
+    return cloudinary.url(publicId, {
+      resource_type: 'video',
+      type: 'authenticated',
+      sign_url: true,
+      secure: true,
+      expires_at: expiresAt,
+    });
+  } catch (err) {
+    logger.error(`[Cloudinary] Signed audio URL failed: ${err.message}`);
     return null;
   }
 };

@@ -8,7 +8,7 @@ const questionSchema = new mongoose.Schema({
     type: [String],
     default: [],
     validate: {
-      validator: function (v) { return this.type !== 'mcq' || v.length === 4; },
+      validator: function (v) { return this.type !== 'mcq' || (Array.isArray(v) && v.length === 4); },
       message: 'MCQ questions must have exactly 4 options',
     },
   },
@@ -23,6 +23,22 @@ const questionSchema = new mongoose.Schema({
   // Common
   explanation: { type: String, default: '' },
   topic:       { type: String, default: '' },
+  // AI listening / narration (optional; backward compatible)
+  isAudioQuestion: { type: Boolean, default: false },
+  /** e.g. dictation, listening_comprehension, audio_mcq — extensible */
+  listeningExerciseType: { type: String, default: '' },
+  /** Legacy / optional direct URL; authenticated exams use audioCloudinaryPublicId */
+  audioUrl: { type: String, default: '' },
+  audioCloudinaryPublicId: { type: String, default: '' },
+  /** Text shown to students after submit / accessibility (may be empty for dictation) */
+  audioTranscript: { type: String, default: '' },
+  /** Spoken script — hidden from students during delivery */
+  narrationText: { type: String, default: '' },
+  /** Max play sessions via secure token endpoint; omit = unlimited */
+  replayLimit: { type: Number, default: undefined },
+  audioDuration: { type: Number, default: undefined },
+  audioVoice: { type: String, default: '' },
+  audioLanguage: { type: String, default: '' },
 });
 
 const examSchema = new mongoose.Schema({
@@ -59,6 +75,13 @@ const examSchema = new mongoose.Schema({
   /** When true, questionVariants holds 3 shuffled copies (same N questions each); counts as 3 toward creator usage */
   multipleSets: { type: Boolean, default: false },
   questionVariants: { type: mongoose.Schema.Types.Mixed, default: null },
+
+  /** Listening / AI audio questions (CAMB.AI + stored audio) */
+  includeListeningQuestions: { type: Boolean, default: false },
+  listeningQuestionCount: { type: Number, default: 0, min: 0, max: 50 },
+  listeningVoiceAccent: { type: String, default: '' },
+  listeningNarrationStyle: { type: String, default: '' },
+  listeningResourceGrounded: { type: Boolean, default: undefined },
 }, { timestamps: true });
 
 // Pre-save: only set timePerQuestion from difficulty if not explicitly provided

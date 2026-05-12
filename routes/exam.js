@@ -2,8 +2,8 @@ import express from 'express';
 import multer from 'multer';
 import {
   analyzeProctoringFrame,
-  createExam, deleteExam, executeCode, getExamById, getMyExams, getPublicExams,
-  parsePDF, regenerateExam, regenerateQuestion, saveScreenshot, updateExam, updateQuestions,
+  createExam, deleteExam, executeCode, generateQuestionFromTopic, getExamById, getMyExams, getPublicExams,
+  issueExamAudioAccess, parsePDF, previewListeningVoice, regenerateExam, regenerateQuestion, saveScreenshot, updateExam, updateQuestions,
 } from '../controllers/examController.js';
 import { protect } from '../middleware/auth.js';
 import { examCreationLimiter } from '../middleware/rateLimiter.js';
@@ -25,14 +25,17 @@ router.use(protect);
 router.post('/execute-code', executeCode);
 router.post('/parse-pdf', upload.single('file'), parsePDF);
 router.post('/analyze-proctoring', analyzeProctoringFrame);
+router.post('/preview-listening-voice', previewListeningVoice);
 router.post('/', examCreationLimiter, createExam);
 router.get('/', getMyExams);
+router.post('/:id/audio-access', issueExamAudioAccess);
 router.get('/:id', getExamById);
 router.put('/:id', updateExam);
 router.put('/:id/questions', updateQuestions);
 router.delete('/:id', deleteExam);
 router.post('/:id/regenerate', regenerateExam);
 router.post('/:id/regenerate-question/:index', regenerateQuestion);
+router.post('/:id/generate-question-from-topic', generateQuestionFromTopic);
 router.post('/:id/screenshot', saveScreenshot);
 
 export default router;

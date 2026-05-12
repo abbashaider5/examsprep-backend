@@ -82,22 +82,27 @@ export const retrieveWithAtlasVectorSearch = async (resourceId, queryVector, lim
 /**
  * Build a retrieval query string from exam settings.
  */
-export const buildRetrievalQuery = ({ subject, topics = [] }) => {
+export const buildRetrievalQuery = ({ subject, topics = [], focusTopic } = {}) => {
   const t = (topics || []).filter(Boolean).slice(0, 12).join(', ');
   const sub = (subject || '').trim() || 'educational material';
-  return t ? `${sub}. Relevant topics: ${t}.` : `${sub}.`;
+  const focus = (focusTopic || '').trim();
+  let q = t ? `${sub}. Relevant topics: ${t}.` : `${sub}.`;
+  if (focus) q += ` Prioritize passages related to: ${focus}.`;
+  return q;
 };
 
 /**
  * @param {import('mongoose').Types.ObjectId|string} resourceId
- * @param {{ subject: string, topics?: string[], maxChars?: number, topK?: number }} opts
+ * @param {{ subject: string, topics?: string[], focusTopic?: string, maxChars?: number, topK?: number }} opts
  */
 export const retrieveGroundingContext = async (resourceId, opts) => {
   const rid = typeof resourceId === 'string' ? new mongoose.Types.ObjectId(resourceId) : resourceId;
   const maxChars = opts.maxChars ?? 14_000;
   const topK = opts.topK ?? 22;
+  const focusRaw = String(opts.focusTopic || '').trim();
   const topics = (opts.topics || []).map((t) => String(t).trim()).filter(Boolean);
-  const keywords = [...topics, ...(opts.subject || '').split(/\s+/).filter((w) => w.length > 2)].slice(0, 24);
+  const focusTokens = focusRaw ? focusRaw.split(/\s+/).filter((w) => w.length > 1).slice(0, 16) : [];
+  const keywords = [...focusTokens, ...topics, ...(opts.subject || '').split(/\s+/).filter((w) => w.length > 2)].slice(0, 32);
 
   const chunks = await ResourceChunk.find({ resource: rid })
     .select('text embedding chunkIndex sectionTitle')
@@ -110,7 +115,7 @@ export const retrieveGroundingContext = async (resourceId, opts) => {
 
   if (withEmb.length) {
     try {
-      const q = buildRetrievalQuery({ subject: opts.subject, topics });
+      const q = buildRetrievalQuery({ subject: opts.subject, topics, focusTopic: focusRaw || undefined });
       const pack = await embedTexts([q], { taskType: 'RETRIEVAL_QUERY' });
       const qVec = pack?.embeddings?.[0];
       if (qVec) {

@@ -21,12 +21,16 @@ import crypto from 'crypto';
 import { createRequire } from 'module';
 import {
   analyzeProctoringImage,
-  generateCodingQuestions, generateDescriptiveQuestions, generateGroundedExamQuestions, generateMCQs,
-  generateQuestionsFromText, generateSingleQuestion,
+  generateCodingQuestions, generateDescriptiveQuestions, generateGroundedExamQuestions, generateListeningExamQuestions,
+  generateMCQs,
+  generateQuestionsFromText, generateSingleListeningQuestion, generateSingleQuestion,
 } from '../services/aiService.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
 import { buildInstructorExamReportData } from '../utils/instructorExamReportData.js';
-import { isCloudinaryConfigured, uploadScreenshot } from '../services/cloudinaryService.js';
+import { isCloudinaryConfigured, signedAuthenticatedMediaUrl, uploadScreenshot } from '../services/cloudinaryService.js';
+import { interleaveListeningEvenly, synthesizeAndAttachListeningAudio } from '../services/examListeningService.js';
+import { isCambAiTtsConfigured, synthesizeExamNarration } from '../services/tts/ttsService.js';
+import { previewSampleTextForStyle, voiceMetaFromAccent } from '../utils/listeningVoicePresets.js';
 import logger from '../utils/logger.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import { extractTextFromResourceBuffer } from '../services/resourceTextExtraction.js';
@@ -196,6 +200,34 @@ export const createExam = async (req, res, next) => {
     const examTypeEff = enableCoding ? 'coding' : examType;
     const RAG_PREFIX = '__RAG__:';
 
+    const instructorLike = ['instructor', 'admin', 'principal'].includes(user.role);
+    const wantListen = Boolean(req.body.includeListeningQuestions)
+      && instructorLike
+      && !enableCoding && examType !== 'coding';
+    let listenCount = 0;
+    if (wantListen) {
+      const rawLc = Number(req.body.listeningQuestionCount);
+      listenCount = Math.min(15, Math.max(1, Number.isFinite(rawLc) ? rawLc : 1));
+      listenCount = Math.min(listenCount, Math.max(1, requestedQ - 1));
+    }
+    const regularTotal = requestedQ - listenCount;
+    const replayLimitListening = (() => {
+      const mode = String(req.body.audioReplayMode || 'unlimited').toLowerCase();
+      const maxN = Number(req.body.audioReplayMax);
+      if (mode === 'once') return 1;
+      if (mode === 'limited') return Math.max(2, Math.min(20, Number.isFinite(maxN) ? maxN : 3));
+      return undefined;
+    })();
+    if (listenCount > 0) {
+      if (!isCambAiTtsConfigured()) {
+        return next(new AppError('Listening questions require CAMB_AI_API_KEY to be configured on the server.', 422));
+      }
+      if (!isCloudinaryConfigured()) {
+        return next(new AppError('Listening questions require Cloudinary to be configured for secure audio storage.', 422));
+      }
+    }
+    const genQ = listenCount > 0 ? regularTotal : requestedQ;
+
     if (enableCoding || examTypeEff === 'coding') {
       questions = await generateCodingQuestions({ subject, difficulty, numQuestions: requestedQ, topics });
     } else if (resolvedContextText.startsWith(RAG_PREFIX)) {
@@ -203,7 +235,7 @@ export const createExam = async (req, res, next) => {
       questions = await generateGroundedExamQuestions({
         context: ctx,
         subject,
-        numQuestions: requestedQ,
+        numQuestions: genQ,
         examType: examTypeEff,
         difficulty,
         mixedMcqPercent,
@@ -211,19 +243,51 @@ export const createExam = async (req, res, next) => {
       });
     } else if (resolvedContextText) {
       questions = await generateQuestionsFromText({
-        text: resolvedContextText, numQuestions: requestedQ, examType: examTypeEff, difficulty, mixedMcqPercent,
+        text: resolvedContextText, numQuestions: genQ, examType: examTypeEff, difficulty, mixedMcqPercent,
       });
     } else if (examTypeEff === 'descriptive') {
-      questions = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: requestedQ, topics });
+      questions = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: genQ, topics });
     } else if (examTypeEff === 'mixed') {
-      const { mcqCount, descCount } = splitMixed(requestedQ, mixedMcqPercent);
+      const { mcqCount, descCount } = splitMixed(genQ, mixedMcqPercent);
       const [mcqs, desc] = await Promise.all([
         mcqCount > 0 ? generateMCQs({ subject, difficulty, numQuestions: mcqCount, topics }) : Promise.resolve([]),
         descCount > 0 ? generateDescriptiveQuestions({ subject, difficulty, numQuestions: descCount, topics }) : Promise.resolve([]),
       ]);
       questions = [...mcqs, ...desc];
     } else {
-      questions = await generateMCQs({ subject, difficulty, numQuestions: requestedQ, topics });
+      questions = await generateMCQs({ subject, difficulty, numQuestions: genQ, topics });
+    }
+
+    if (listenCount > 0) {
+      const listeningVoiceAccent = String(req.body.listeningVoiceAccent || 'american').toLowerCase();
+      const listeningNarrationStyle = String(req.body.listeningNarrationStyle || 'academic').toLowerCase();
+      const hasResourceForListen = Boolean(resourceId && resolvedContextText);
+      const listeningResourceGrounded = hasResourceForListen && req.body.listeningResourceGrounded !== false;
+
+      let groundedListen = false;
+      let ctxRag = '';
+      let ctxText = '';
+      if (listeningResourceGrounded) {
+        if (resolvedContextText.startsWith(RAG_PREFIX)) {
+          groundedListen = true;
+          ctxRag = resolvedContextText.slice(RAG_PREFIX.length);
+        } else if (resolvedContextText.length > 80) {
+          ctxText = resolvedContextText;
+        }
+      }
+      const listeningBatch = await generateListeningExamQuestions({
+        subject,
+        numQuestions: listenCount,
+        difficulty,
+        topics: topics || [],
+        replayLimit: replayLimitListening,
+        grounded: groundedListen,
+        context: ctxRag,
+        contextText: groundedListen ? '' : ctxText,
+        narrationStyle: listeningNarrationStyle,
+      });
+      questions = interleaveListeningEvenly(questions, listeningBatch);
+      questions = await synthesizeAndAttachListeningAudio(questions, { accent: listeningVoiceAccent });
     }
 
     // Time per question: explicit or derive from difficulty
@@ -261,6 +325,13 @@ export const createExam = async (req, res, next) => {
       showAnswersToUser:   showAnswersToUser  !== undefined ? Boolean(showAnswersToUser)  : true,
       expiryDate:          expiryDate ? new Date(expiryDate) : null,
       sourceResource:      sourceResourceId || null,
+      includeListeningQuestions: listenCount > 0,
+      listeningQuestionCount: listenCount,
+      listeningVoiceAccent: listenCount > 0 ? String(req.body.listeningVoiceAccent || 'american').toLowerCase() : undefined,
+      listeningNarrationStyle: listenCount > 0 ? String(req.body.listeningNarrationStyle || 'academic').toLowerCase() : undefined,
+      listeningResourceGrounded: listenCount > 0
+        ? (Boolean(resourceId && resolvedContextText) && req.body.listeningResourceGrounded !== false)
+        : undefined,
     });
 
     user.examsCreatedThisMonth = used + usageMultiplier;
@@ -392,6 +463,37 @@ export const regenerateExam = async (req, res, next) => {
     const enableCoding = req.body.enableCoding !== undefined ? Boolean(req.body.enableCoding) : exam.enableCoding;
     const examTypeEff = enableCoding ? 'coding' : (exam.examType || 'mcq');
 
+    const wantListen = Boolean(req.body.includeListeningQuestions ?? exam.includeListeningQuestions)
+      && ['instructor', 'admin', 'principal'].includes(req.user.role)
+      && !enableCoding && examTypeEff !== 'coding';
+    let listenCount = 0;
+    if (wantListen) {
+      const rawLc = Number(req.body.listeningQuestionCount ?? exam.listeningQuestionCount);
+      listenCount = Math.min(15, Math.max(1, Number.isFinite(rawLc) ? rawLc : 1));
+      listenCount = Math.min(listenCount, Math.max(1, numQ - 1));
+    }
+    const regularTotal = numQ - listenCount;
+    const replayLimitListening = (() => {
+      if (req.body.audioReplayMode !== undefined && req.body.audioReplayMode !== null) {
+        const mode = String(req.body.audioReplayMode || 'unlimited').toLowerCase();
+        const maxN = Number(req.body.audioReplayMax);
+        if (mode === 'once') return 1;
+        if (mode === 'limited') return Math.max(2, Math.min(20, Number.isFinite(maxN) ? maxN : 3));
+        return undefined;
+      }
+      const prev = exam.questions.find((q) => q.isAudioQuestion && typeof q.replayLimit === 'number');
+      return prev?.replayLimit;
+    })();
+    if (listenCount > 0) {
+      if (!isCambAiTtsConfigured()) {
+        return next(new AppError('Listening questions require CAMB_AI_API_KEY to be configured on the server.', 422));
+      }
+      if (!isCloudinaryConfigured()) {
+        return next(new AppError('Listening questions require Cloudinary to be configured for secure audio storage.', 422));
+      }
+    }
+    const genQ = listenCount > 0 ? regularTotal : numQ;
+
     let questions;
 
     if (enableCoding || examTypeEff === 'coding') {
@@ -420,7 +522,7 @@ export const regenerateExam = async (req, res, next) => {
         questions = await generateGroundedExamQuestions({
           context,
           subject,
-          numQuestions: numQ,
+          numQuestions: genQ,
           examType: examTypeEff,
           difficulty,
           mixedMcqPercent: req.body.mixedMcqPercent ?? 50,
@@ -446,29 +548,71 @@ export const regenerateExam = async (req, res, next) => {
         }
         questions = await generateQuestionsFromText({
           text,
-          numQuestions: numQ,
+          numQuestions: genQ,
           examType: examTypeEff,
           difficulty,
           mixedMcqPercent: req.body.mixedMcqPercent ?? 50,
         });
       }
     } else if (examTypeEff === 'descriptive') {
-      questions = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: numQ, topics });
+      questions = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: genQ, topics });
     } else if (examTypeEff === 'mixed') {
       const pct = req.body.mixedMcqPercent ?? 50;
       let p = Number(pct);
       if (!Number.isFinite(p)) p = 50;
       p = Math.max(10, Math.min(90, Math.round(p)));
-      let mcqCount = numQ <= 1 ? (p >= 50 ? 1 : 0) : Math.max(1, Math.min(numQ - 1, Math.round((numQ * p) / 100)));
-      let descCount = numQ - mcqCount;
-      if (numQ <= 1) descCount = numQ - mcqCount;
+      let mcqCount = genQ <= 1 ? (p >= 50 ? 1 : 0) : Math.max(1, Math.min(genQ - 1, Math.round((genQ * p) / 100)));
+      let descCount = genQ - mcqCount;
+      if (genQ <= 1) descCount = genQ - mcqCount;
       const [mcqs, desc] = await Promise.all([
         mcqCount > 0 ? generateMCQs({ subject, difficulty, numQuestions: mcqCount, topics }) : Promise.resolve([]),
         descCount > 0 ? generateDescriptiveQuestions({ subject, difficulty, numQuestions: descCount, topics }) : Promise.resolve([]),
       ]);
       questions = [...mcqs, ...desc];
     } else {
-      questions = await generateMCQs({ subject, difficulty, numQuestions: numQ, topics });
+      questions = await generateMCQs({ subject, difficulty, numQuestions: genQ, topics });
+    }
+
+    if (listenCount > 0) {
+      const listeningVoiceAccent = String(req.body.listeningVoiceAccent ?? exam.listeningVoiceAccent ?? 'american').toLowerCase();
+      const listeningNarrationStyle = String(req.body.listeningNarrationStyle ?? exam.listeningNarrationStyle ?? 'academic').toLowerCase();
+      const lrg = req.body.listeningResourceGrounded !== undefined
+        ? req.body.listeningResourceGrounded !== false
+        : (exam.listeningResourceGrounded !== false);
+
+      let groundedListen = false;
+      let ctxRag = '';
+      let ctxText = '';
+      if (lrg && exam.sourceResource) {
+        const rd = await Resource.findById(exam.sourceResource).select('processingStatus chunkCount');
+        const indexed = (rd?.chunkCount > 0)
+          || (await ResourceChunk.countDocuments({ resource: exam.sourceResource })) > 0;
+        if (indexed && rd?.processingStatus === 'ready') {
+          const { context } = await retrieveGroundingContext(exam.sourceResource, {
+            subject,
+            topics: topics || [],
+            maxChars: 16_000,
+            topK: 26,
+          });
+          if (context && context.length > 50) {
+            groundedListen = true;
+            ctxRag = context;
+          }
+        }
+      }
+      const listeningBatch = await generateListeningExamQuestions({
+        subject,
+        numQuestions: listenCount,
+        difficulty,
+        topics: topics || [],
+        replayLimit: replayLimitListening,
+        grounded: groundedListen,
+        context: ctxRag,
+        contextText: ctxText,
+        narrationStyle: listeningNarrationStyle,
+      });
+      questions = interleaveListeningEvenly(questions, listeningBatch);
+      questions = await synthesizeAndAttachListeningAudio(questions, { accent: listeningVoiceAccent });
     }
 
     exam.questions = questions;
@@ -477,6 +621,19 @@ export const regenerateExam = async (req, res, next) => {
     if (req.body.subject)    exam.subject    = req.body.subject;
     if (req.body.difficulty) exam.difficulty = req.body.difficulty;
     if (req.body.topics)     exam.topics     = req.body.topics;
+    exam.includeListeningQuestions = listenCount > 0;
+    exam.listeningQuestionCount = listenCount;
+    exam.listeningVoiceAccent = listenCount > 0
+      ? String(req.body.listeningVoiceAccent ?? exam.listeningVoiceAccent ?? 'american').toLowerCase()
+      : undefined;
+    exam.listeningNarrationStyle = listenCount > 0
+      ? String(req.body.listeningNarrationStyle ?? exam.listeningNarrationStyle ?? 'academic').toLowerCase()
+      : undefined;
+    exam.listeningResourceGrounded = listenCount > 0
+      ? (req.body.listeningResourceGrounded !== undefined
+        ? req.body.listeningResourceGrounded !== false
+        : exam.listeningResourceGrounded !== false)
+      : undefined;
     await exam.save();
     await UserExamShuffle.deleteMany({ exam: exam._id });
 
@@ -506,6 +663,127 @@ export const regenerateQuestion = async (req, res, next) => {
     const targetQ = exam.questions[index];
     const qType = targetQ?.type || exam.examType || 'mcq';
 
+    if (targetQ?.isAudioQuestion) {
+      let groundedContext = '';
+      let groundedMode = false;
+      if (exam.sourceResource && qType !== 'coding') {
+        const resDoc = await Resource.findById(exam.sourceResource).select('processingStatus chunkCount');
+        if (resDoc?.processingStatus === 'ready') {
+          const indexed = (resDoc.chunkCount > 0)
+            || (await ResourceChunk.countDocuments({ resource: exam.sourceResource })) > 0;
+          if (indexed) {
+            const { context } = await retrieveGroundingContext(exam.sourceResource, {
+              subject: exam.subject,
+              topics: exam.topics || [],
+              maxChars: 14_000,
+              topK: 22,
+            });
+            if (context && context.length > 50) {
+              groundedContext = context;
+              groundedMode = true;
+            }
+          }
+        }
+      }
+      if (!isCambAiTtsConfigured() || !isCloudinaryConfigured()) {
+        return next(new AppError('Regenerating listening items requires CAMB_AI_API_KEY and Cloudinary to be configured.', 422));
+      }
+      let newQuestion = await generateSingleListeningQuestion({
+        subject: exam.subject,
+        difficulty: exam.difficulty,
+        topics: exam.topics || [],
+        contextText: groundedContext || undefined,
+        groundedMode,
+        replayLimit: typeof targetQ.replayLimit === 'number' ? targetQ.replayLimit : undefined,
+        existingQuestions: existing,
+        narrationStyle: exam.listeningNarrationStyle || 'academic',
+      });
+      newQuestion.replayLimit = typeof targetQ.replayLimit === 'number' ? targetQ.replayLimit : newQuestion.replayLimit;
+      const [hydrated] = await synthesizeAndAttachListeningAudio([newQuestion], {
+        accent: exam.listeningVoiceAccent || 'american',
+      });
+      exam.questions[index] = hydrated;
+    } else {
+      let groundedContext = '';
+      let groundedMode = false;
+      if (exam.sourceResource && qType !== 'coding') {
+        const resDoc = await Resource.findById(exam.sourceResource).select('processingStatus chunkCount');
+        if (resDoc?.processingStatus === 'ready') {
+          const indexed = (resDoc.chunkCount > 0)
+            || (await ResourceChunk.countDocuments({ resource: exam.sourceResource })) > 0;
+          if (indexed) {
+            const { context } = await retrieveGroundingContext(exam.sourceResource, {
+              subject: exam.subject,
+              topics: exam.topics || [],
+              maxChars: 14_000,
+              topK: 22,
+            });
+            if (context && context.length > 50) {
+              groundedContext = context;
+              groundedMode = true;
+            }
+          }
+        }
+      }
+
+      const newQuestion = await generateSingleQuestion({
+        subject: exam.subject,
+        difficulty: exam.difficulty,
+        examType: qType,
+        existingQuestions: existing,
+        topic: targetQ?.topic,
+        contextText: groundedContext || undefined,
+        groundedMode,
+      });
+
+      exam.questions[index] = newQuestion;
+    }
+
+    exam.multipleSets = false;
+    exam.questionVariants = null;
+    exam.markModified('questions');
+    await exam.save();
+    await UserExamShuffle.deleteMany({ exam: exam._id });
+
+    res.json({ question: exam.questions[index], index });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** POST /api/exams/:id/generate-question-from-topic — replace question at anchor with a new AI question for the given topic (distinct from regenerate-question). */
+export const generateQuestionFromTopic = async (req, res, next) => {
+  try {
+    const exam = await Exam.findById(req.params.id);
+    if (!exam) return next(new AppError('Exam not found', 404));
+    if (exam.createdBy.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return next(new AppError('Not authorized', 403));
+    }
+
+    const topicRaw = typeof req.body.topic === 'string' ? req.body.topic.trim() : '';
+    if (topicRaw.length < 2 || topicRaw.length > 400) {
+      return next(new AppError('Enter a topic or concept (2–400 characters).', 400));
+    }
+
+    const anchorIndex = Number(req.body.anchorIndex);
+    if (Number.isNaN(anchorIndex) || anchorIndex < 0 || anchorIndex >= exam.questions.length) {
+      return next(new AppError('Invalid anchor question index.', 400));
+    }
+
+    const anchor = exam.questions[anchorIndex];
+    if (anchor?.isAudioQuestion) {
+      return next(new AppError('Generate from topic is not available for listening items.', 400));
+    }
+
+    const qType = anchor?.type || (exam.examType === 'mixed' ? 'mcq' : exam.examType) || 'mcq';
+
+    let difficulty = exam.difficulty;
+    const dBody = req.body.difficulty;
+    if (dBody === 'easy' || dBody === 'medium' || dBody === 'hard') difficulty = dBody;
+
+    const guidance = typeof req.body.guidance === 'string' ? req.body.guidance.trim().slice(0, 800) : '';
+    const questionStyle = typeof req.body.questionStyle === 'string' ? req.body.questionStyle.trim().slice(0, 40) : '';
+
     let groundedContext = '';
     let groundedMode = false;
     if (exam.sourceResource && qType !== 'coding') {
@@ -514,11 +792,16 @@ export const regenerateQuestion = async (req, res, next) => {
         const indexed = (resDoc.chunkCount > 0)
           || (await ResourceChunk.countDocuments({ resource: exam.sourceResource })) > 0;
         if (indexed) {
+          const retrievalTopics = [topicRaw, ...(exam.topics || [])]
+            .map((t) => String(t).trim())
+            .filter(Boolean)
+            .slice(0, 18);
           const { context } = await retrieveGroundingContext(exam.sourceResource, {
             subject: exam.subject,
-            topics: exam.topics || [],
+            topics: retrievalTopics,
+            focusTopic: topicRaw,
             maxChars: 14_000,
-            topK: 22,
+            topK: 24,
           });
           if (context && context.length > 50) {
             groundedContext = context;
@@ -528,24 +811,28 @@ export const regenerateQuestion = async (req, res, next) => {
       }
     }
 
+    const existingQuestions = exam.questions.filter((_, i) => i !== anchorIndex);
+
     const newQuestion = await generateSingleQuestion({
       subject: exam.subject,
-      difficulty: exam.difficulty,
+      difficulty,
       examType: qType,
-      existingQuestions: existing,
-      topic: targetQ?.topic,
+      existingQuestions,
+      topic: topicRaw,
       contextText: groundedContext || undefined,
       groundedMode,
+      extraGuidance: guidance || undefined,
+      questionStyle: questionStyle || undefined,
     });
 
-    exam.questions[index] = newQuestion;
+    exam.questions[anchorIndex] = newQuestion;
     exam.multipleSets = false;
     exam.questionVariants = null;
     exam.markModified('questions');
     await exam.save();
     await UserExamShuffle.deleteMany({ exam: exam._id });
 
-    res.json({ question: exam.questions[index], index });
+    res.json({ question: newQuestion, index: anchorIndex });
   } catch (err) {
     next(err);
   }
@@ -686,6 +973,31 @@ export const getMyExams = async (req, res, next) => {
   }
 };
 
+/** POST /api/exams/preview-listening-voice — short sample for teacher trust / UX */
+export const previewListeningVoice = async (req, res, next) => {
+  try {
+    if (!['instructor', 'admin', 'principal'].includes(req.user.role)) {
+      return next(new AppError('Not authorized', 403));
+    }
+    if (!isCambAiTtsConfigured()) {
+      return next(new AppError('Voice preview requires CAMB_AI_API_KEY to be configured.', 422));
+    }
+    const accent = String(req.body?.accent || 'american').toLowerCase();
+    const style = String(req.body?.style || 'academic').toLowerCase();
+    const text = previewSampleTextForStyle(style);
+    const voice = voiceMetaFromAccent(accent);
+    const { buffer, contentType } = await synthesizeExamNarration(text, voice);
+    if (buffer.length > 520_000) {
+      return next(new AppError('Preview response too large.', 413));
+    }
+    const dataUrl = `data:${contentType || 'audio/wav'};base64,${buffer.toString('base64')}`;
+    res.json({ dataUrl });
+  } catch (err) {
+    logger.warn(`[previewListeningVoice] ${err.message}`);
+    next(err);
+  }
+};
+
 export const getPublicExams = async (req, res, next) => {
   try {
     const exams = await Exam.find({ isPublic: true })
@@ -693,6 +1005,117 @@ export const getPublicExams = async (req, res, next) => {
       .sort({ createdAt: -1 })
       .select('-questions');
     res.json({ exams });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const mapQuestionListForAudioDelivery = (questions, mode) => {
+  if (!Array.isArray(questions)) return questions;
+  if (mode === 'student') {
+    return questions.map((q) => {
+      if (!q?.isAudioQuestion) return q;
+      const o = { ...q };
+      delete o.narrationText;
+      delete o.audioTranscript;
+      delete o.audioCloudinaryPublicId;
+      delete o.audioUrl;
+      o.audioRequiresToken = true;
+      return o;
+    });
+  }
+  if (mode === 'privileged') {
+    return questions.map((q) => {
+      if (!q?.isAudioQuestion || !q.audioCloudinaryPublicId) return q;
+      return {
+        ...q,
+        audioUrl: signedAuthenticatedMediaUrl(q.audioCloudinaryPublicId, 900) || q.audioUrl || '',
+      };
+    });
+  }
+  return questions;
+};
+
+/** POST /api/exams/:id/audio-access — short-lived signed URL + replay accounting */
+export const issueExamAudioAccess = async (req, res, next) => {
+  try {
+    const exam = await Exam.findById(req.params.id);
+    if (!exam) return next(new AppError('Exam not found', 404));
+    const isOwner = exam.createdBy.toString() === req.user._id.toString();
+    const isAdmin = req.user.role === 'admin';
+
+    if (!exam.isPublic && !isOwner && !isAdmin) {
+      const invite = await ExamInvite.findOne({
+        exam: exam._id,
+        email: req.user.email.toLowerCase(),
+        status: 'accepted',
+      });
+      if (!invite) {
+        const inGroup = await Group.exists({
+          'sharedExams.exam': exam._id,
+          $or: [{ members: req.user._id }, { instructor: req.user._id }],
+        });
+        if (!inGroup) return next(new AppError('Not authorized', 403));
+      }
+    }
+    if (!isOwner && !isAdmin && exam.expiryDate && new Date(exam.expiryDate) < new Date()) {
+      return next(new AppError('This test has expired', 403));
+    }
+
+    const qIndex = Number(req.body?.questionIndex);
+    if (!Number.isInteger(qIndex) || qIndex < 0) {
+      return next(new AppError('questionIndex is required', 400));
+    }
+
+    const variantIndex = await resolveVariantIndex(req.user, exam);
+    const baseQuestions = getBaseQuestionsForExam(exam, variantIndex);
+    let shuffle = await UserExamShuffle.findOne({ user: req.user._id, exam: exam._id });
+    if (!shuffle) {
+      return next(new AppError('Open the exam once to initialize your attempt, then try audio again.', 409));
+    }
+    if (shuffle.variantIndex !== variantIndex) {
+      shuffle.variantIndex = variantIndex;
+      const state = createUserShuffleState(baseQuestions);
+      shuffle.questionOrder = state.questionOrder;
+      shuffle.optionPermutations = state.optionPermutations;
+      shuffle.audioPlayCounts = {};
+      shuffle.markModified('audioPlayCounts');
+      await shuffle.save();
+    }
+
+    const displayQs = buildDisplayQuestions(baseQuestions, shuffle);
+    const q = displayQs[qIndex];
+    if (!q?.isAudioQuestion || !q.audioCloudinaryPublicId) {
+      return next(new AppError('This question does not have secured audio.', 400));
+    }
+
+    const limit = q.replayLimit;
+    const counts = shuffle.audioPlayCounts && typeof shuffle.audioPlayCounts === 'object'
+      ? { ...shuffle.audioPlayCounts }
+      : {};
+    const key = String(qIndex);
+    const used = Number(counts[key]) || 0;
+
+    if (typeof limit === 'number' && limit >= 1) {
+      if (used >= limit) {
+        return next(new AppError('Maximum audio replays reached for this question.', 403));
+      }
+      counts[key] = used + 1;
+      shuffle.audioPlayCounts = counts;
+      shuffle.markModified('audioPlayCounts');
+      await shuffle.save();
+    }
+
+    const url = signedAuthenticatedMediaUrl(q.audioCloudinaryPublicId, 180);
+    if (!url) {
+      return next(new AppError('Could not issue a playback URL. Check Cloudinary configuration.', 502));
+    }
+
+    res.json({
+      url,
+      playsUsed: typeof limit === 'number' && limit >= 1 ? (Number(counts[key]) || 1) : null,
+      playsMax: typeof limit === 'number' && limit >= 1 ? limit : null,
+    });
   } catch (err) {
     next(err);
   }
@@ -790,6 +1213,32 @@ export const getExamById = async (req, res, next) => {
           _reviewMeta: { variantIndex, indexInVariant },
         })),
       );
+    }
+
+    if (!isOwner && !isAdmin && !practiceMode && Array.isArray(payload.questions)) {
+      payload.questions = mapQuestionListForAudioDelivery(payload.questions, 'student');
+    } else if (practiceMode && !isOwner && !isAdmin && Array.isArray(payload.questions)) {
+      payload.questions = mapQuestionListForAudioDelivery(payload.questions, 'student');
+    }
+
+    if (isOwner || isAdmin) {
+      if (Array.isArray(payload.questions)) {
+        payload.questions = mapQuestionListForAudioDelivery(payload.questions, 'privileged');
+      }
+      if (Array.isArray(payload.questionVariants)) {
+        payload.questionVariants = payload.questionVariants.map((v) =>
+          mapQuestionListForAudioDelivery(Array.isArray(v) ? v : [], 'privileged'),
+        );
+      }
+    }
+
+    if ((isOwner || isAdmin) && Array.isArray(payload.mergedQuestionsReview)) {
+      payload.mergedQuestionsReview = payload.mergedQuestionsReview.map((row) => {
+        const meta = row._reviewMeta;
+        const { _reviewMeta, ...q } = row;
+        const [mapped] = mapQuestionListForAudioDelivery([q], 'privileged');
+        return { ...mapped, _reviewMeta: meta };
+      });
     }
 
     res.json({ exam: payload });

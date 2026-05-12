@@ -260,10 +260,17 @@ const GROUNDED_RULES = `MANDATORY CONSTRAINTS:
 - If the snippets do not support enough distinct, high-quality questions, return FEWER than requested — never invent filler questions.
 - Align difficulty with how deeply the snippets support reasoning vs recall.`;
 
-const generateMCQsFromGroundedSnippets = async ({ context, subject, numQuestions, difficulty, seed }) => {
+const generateMCQsFromGroundedSnippets = async ({ context, subject, numQuestions, difficulty, seed, focusTopic }) => {
+  const focusBlock = (focusTopic && String(focusTopic).trim())
+    ? `
+
+TEACHER PRIORITY: The question must target this concept (still only using facts supported by the snippets): "${String(focusTopic).trim()}"
+Prefer snippets that clearly relate to this concept. If snippets barely relate, still stay grounded — do not invent outside material.`
+    : '';
   const prompt = `You are an expert exam author for K-12 and higher-ed assessments.
 
 ${GROUNDED_RULES}
+${focusBlock}
 
 Difficulty level requested: ${difficulty}
 
@@ -470,28 +477,54 @@ Rules:
 
 /** Regenerate a single question (replace one in the array) */
 export const generateSingleQuestion = async ({
-  subject, difficulty, examType = 'mcq', existingQuestions = [], topic, contextText, groundedMode = false,
+  subject,
+  difficulty,
+  examType = 'mcq',
+  existingQuestions = [],
+  topic,
+  contextText,
+  groundedMode = false,
+  extraGuidance,
+  questionStyle,
 }) => {
   const existing = existingQuestions.slice(0, 5).map(q => q.question).join('\n- ');
   const avoidText = existing ? `\nDo NOT generate a question similar to these:\n- ${existing}` : '';
   const ctxCap = groundedMode ? 14_000 : 3000;
   const contextSection = contextText ? `\n\nBase your question on this content:\n"""\n${contextText.slice(0, ctxCap)}\n"""` : '';
-  const topicHint = topic ? ` The question should be about "${topic}".` : '';
+  const topicHint = topic ? ` The question must focus on: "${topic}".` : '';
+  const guideLine = extraGuidance ? `\nTeacher notes (respect unless they conflict with grounded rules): ${String(extraGuidance).trim().slice(0, 600)}` : '';
+  const styleLine = questionStyle === 'concept_check'
+    ? '\nStyle: concise concept check (definitions, recognition, short stem).'
+    : questionStyle === 'application'
+      ? '\nStyle: short scenario or application stem appropriate to the level.'
+      : '';
   const seed = Math.floor(Math.random() * 10000);
+  const topicForLists = topic ? [String(topic).trim()] : [];
 
   if (examType === 'descriptive') {
     if (groundedMode && contextText?.trim()) {
+      const topicHints = [...topicForLists, ...(extraGuidance ? [String(extraGuidance).trim().slice(0, 200)] : [])].filter(Boolean);
       const qs = await generateDescriptiveFromGroundedSnippets({
-        subject, numQuestions: 1, difficulty, topics: topic ? [topic] : [], seed,
+        subject, numQuestions: 1, difficulty, topics: topicHints.length ? topicHints : topicForLists, seed,
         context: contextText.slice(0, ctxCap),
       });
       return qs[0];
     }
-    const qs = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: 1, topics: topic ? [topic] : [], contextText });
+    const qs = await generateDescriptiveQuestions({
+      subject,
+      difficulty,
+      numQuestions: 1,
+      topics: [...topicForLists, ...(extraGuidance ? [String(extraGuidance).trim().slice(0, 160)] : [])].filter(Boolean),
+      contextText,
+    });
     return qs[0];
   }
   if (examType === 'coding') {
-    const qs = await generateCodingQuestions({ subject, difficulty, numQuestions: 1, topics: topic ? [topic] : [] });
+    const tps = [...topicForLists];
+    if (extraGuidance) tps.push(String(extraGuidance).trim().slice(0, 200));
+    const qs = await generateCodingQuestions({
+      subject, difficulty, numQuestions: 1, topics: tps.filter(Boolean).slice(0, 6),
+    });
     return qs[0];
   }
 
@@ -502,12 +535,13 @@ export const generateSingleQuestion = async ({
       numQuestions: 1,
       difficulty,
       seed,
+      focusTopic: topic || undefined,
     });
     return qs[0];
   }
 
   // MCQ (generic)
-  const prompt = `Generate exactly 1 unique MCQ for subject "${subject}", difficulty "${difficulty}".${topicHint}${avoidText}${contextSection}
+  const prompt = `Generate exactly 1 unique MCQ for subject "${subject}", difficulty "${difficulty}".${topicHint}${guideLine}${styleLine}${avoidText}${contextSection}
 Batch ID: ${seed}
 
 Return ONLY a single JSON object (not an array):
@@ -620,6 +654,267 @@ Return JSON: {"topic": "...", "difficulty": "...", "tip": "..."}`;
   } catch {
     return null;
   }
+};
+
+const LISTENING_EXERCISE_TYPES = 'dictation | listening_comprehension | spoken_passage | audio_mcq | fill_blank_from_audio | short_listening_desc';
+
+const NARRATION_STYLE_GUIDANCE = {
+  formal: 'NARRATION VOICE: polished, formal academic English—suitable for high-stakes exams.',
+  conversational: 'NARRATION VOICE: natural, conversational English while staying clear and classroom-appropriate.',
+  academic: 'NARRATION VOICE: standard instructional academic tone—neutral, precise, easy to follow.',
+  kids_friendly: 'NARRATION VOICE: warm, encouraging, age-appropriate for younger learners—still professional.',
+};
+
+const narrationStyleLine = (styleRaw) => {
+  const k = String(styleRaw || 'academic').toLowerCase();
+  return NARRATION_STYLE_GUIDANCE[k] || NARRATION_STYLE_GUIDANCE.academic;
+};
+
+const normalizeListeningQuestion = (raw, subject, replayLimit) => {
+  const type = raw.type === 'descriptive' ? 'descriptive' : 'mcq';
+  const listeningExerciseType = String(raw.listeningExerciseType || 'listening_comprehension').slice(0, 64);
+  const narrationText = String(raw.narrationText || '').trim();
+  const question = String(raw.question || '').trim();
+  const audioTranscript = String(raw.audioTranscript || narrationText || '').trim();
+  const base = {
+    isAudioQuestion: true,
+    listeningExerciseType,
+    question,
+    narrationText,
+    audioTranscript,
+    explanation: String(raw.explanation || '').trim(),
+    topic: String(raw.topic || subject || 'Listening').slice(0, 120),
+    replayLimit: typeof replayLimit === 'number' && replayLimit >= 1 ? replayLimit : undefined,
+    audioUrl: '',
+    audioCloudinaryPublicId: '',
+    audioDuration: undefined,
+    audioVoice: '',
+    audioLanguage: '',
+  };
+  if (type === 'descriptive') {
+    return {
+      ...base,
+      type: 'descriptive',
+      modelAnswer: String(raw.modelAnswer || '').trim(),
+      keyPoints: Array.isArray(raw.keyPoints) ? raw.keyPoints.map(String) : [],
+      options: [],
+      correctAnswer: undefined,
+    };
+  }
+  return {
+    ...base,
+    type: 'mcq',
+    options: Array.isArray(raw.options) ? raw.options.map(String) : [],
+    correctAnswer: Number(raw.correctAnswer),
+  };
+};
+
+const generateListeningFromGroundedSnippets = async ({
+  context, subject, numQuestions, difficulty, topics, replayLimit, seed, narrationStyle,
+}) => {
+  const topicText = topics?.length ? `Topic hints (stay within snippets): ${topics.join(', ')}.` : '';
+  const styleLine = narrationStyleLine(narrationStyle);
+  const prompt = `You are an expert assessment author for listening and spoken-language exams.
+
+${GROUNDED_RULES}
+
+${styleLine}
+
+Difficulty: ${difficulty}
+${topicText}
+Course / subject label (tone only): "${subject}"
+
+SOURCE SNIPPETS:
+"""
+${context}
+"""
+
+Batch ID: ${seed}
+
+Create exactly ${numQuestions} DISTINCT listening exercises. Each item must be answerable ONLY from what can reasonably be inferred from the snippets (no outside facts).
+
+Return ONLY a valid JSON array (no markdown):
+[
+  {
+    "listeningExerciseType": "${LISTENING_EXERCISE_TYPES}",
+    "type": "mcq or descriptive",
+    "question": "What the student reads on screen AFTER listening (do not paste the full narration here; ask about it)",
+    "narrationText": "The exact words that will be read aloud as the listening passage (clear, natural, educational; may include short sentences suitable for dictation when type is dictation)",
+    "audioTranscript": "Same as narrationText OR a concise transcript line for accessibility",
+    "explanation": "One educational sentence",
+    "topic": "short label from snippet vocabulary",
+    "options": ["A. ...","B. ...","C. ...","D. ..."],
+    "correctAnswer": 0,
+    "modelAnswer": "for descriptive only — concise ideal answer",
+    "keyPoints": ["for descriptive only — 2-4 strings"]
+  }
+]
+
+Rules:
+- Vary listeningExerciseType across items when the snippets support it.
+- For type mcq: include exactly 4 options and correctAnswer 0-3.
+- For type descriptive: use empty options; include modelAnswer and keyPoints.
+- narrationText must stay faithful to snippet vocabulary and facts (paraphrase allowed).
+- Keep narrationText under 900 characters per item.
+- Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
+
+  const completion = await getGroq().chat.completions.create({
+    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.55,
+    max_tokens: 4096,
+  });
+
+  const text = completion.choices[0]?.message?.content?.trim();
+  let rows;
+  try {
+    rows = parseAiJsonArray(text);
+  } catch {
+    throw new Error('AI failed to generate listening question JSON');
+  }
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error('No listening questions generated');
+  return rows.slice(0, numQuestions).map((r) => normalizeListeningQuestion(r, subject, replayLimit));
+};
+
+const generateListeningUngrounded = async ({
+  subject, numQuestions, difficulty, topics, contextText, replayLimit, seed, narrationStyle,
+}) => {
+  const topicText = topics?.length ? `Focus on: ${topics.join(', ')}.` : '';
+  const ctx = contextText ? `\nOptional reference text (stay consistent if provided):\n"""\n${contextText.slice(0, 6000)}\n"""` : '';
+  const styleLine = narrationStyleLine(narrationStyle);
+  const prompt = `You are an expert listening-exam author for schools and universities.
+
+${styleLine}
+
+Create exactly ${numQuestions} UNIQUE listening exercises for "${subject}" at ${difficulty} difficulty. ${topicText}${ctx}
+
+Batch ID: ${seed}
+
+Return ONLY a valid JSON array (no markdown):
+[
+  {
+    "listeningExerciseType": "${LISTENING_EXERCISE_TYPES}",
+    "type": "mcq or descriptive",
+    "question": "On-screen prompt AFTER audio (not the narration itself)",
+    "narrationText": "Professional educational narration to be spoken aloud (clear, natural; under 900 chars)",
+    "audioTranscript": "Mirror narration or short transcript",
+    "explanation": "Brief",
+    "topic": "short label",
+    "options": ["A. ...","B. ...","C. ...","D. ..."],
+    "correctAnswer": 0,
+    "modelAnswer": "descriptive only",
+    "keyPoints": ["descriptive only"]
+  }
+]
+
+Rules:
+- If reference text is provided, do not contradict it.
+- Vary exercise types.
+- MCQ must have 4 options.
+- Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
+
+  const completion = await getGroq().chat.completions.create({
+    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.75,
+    max_tokens: 4096,
+  });
+  const text = completion.choices[0]?.message?.content?.trim();
+  let rows;
+  try {
+    rows = parseAiJsonArray(text);
+  } catch {
+    throw new Error('AI failed to generate listening question JSON');
+  }
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error('No listening questions generated');
+  return rows.slice(0, numQuestions).map((r) => normalizeListeningQuestion(r, subject, replayLimit));
+};
+
+/**
+ * @param {{ context?: string, contextText?: string, subject: string, numQuestions: number, difficulty?: string, topics?: string[], replayLimit?: number, grounded: boolean, narrationStyle?: string }} opts
+ */
+export const generateListeningExamQuestions = async (opts) => {
+  const n = Math.max(1, Math.min(20, Number(opts.numQuestions) || 1));
+  const seed = Math.floor(Math.random() * 10000);
+  const subj = (opts.subject || 'General').trim() || 'General';
+  const ctxStr = (opts.context || '').trim();
+  const narrationStyle = opts.narrationStyle || 'academic';
+  if (opts.grounded && ctxStr.length > 60) {
+    return generateListeningFromGroundedSnippets({
+      context: ctxStr,
+      subject: subj,
+      numQuestions: n,
+      difficulty: opts.difficulty || 'medium',
+      topics: opts.topics || [],
+      replayLimit: opts.replayLimit,
+      seed,
+      narrationStyle,
+    });
+  }
+  return generateListeningUngrounded({
+    subject: subj,
+    numQuestions: n,
+    difficulty: opts.difficulty || 'medium',
+    topics: opts.topics || [],
+    contextText: opts.contextText || '',
+    replayLimit: opts.replayLimit,
+    seed,
+    narrationStyle,
+  });
+};
+
+export const generateSingleListeningQuestion = async ({
+  subject, difficulty, topics = [], contextText, groundedMode = false, replayLimit, existingQuestions = [],
+  narrationStyle = 'academic',
+}) => {
+  const avoid = existingQuestions.slice(0, 6).map((q) => q.question).join('\n- ');
+  const avoidText = avoid ? `\nAvoid duplicating:\n- ${avoid}` : '';
+  const seed = Math.floor(Math.random() * 10000);
+  const ctxCap = groundedMode ? 14_000 : 4000;
+  const ctx = contextText?.trim()
+    ? (groundedMode
+      ? `\n${GROUNDED_RULES}\n\nSOURCE:\n"""\n${contextText.slice(0, ctxCap)}\n"""`
+      : `\nReference:\n"""\n${contextText.slice(0, ctxCap)}\n"""`)
+    : '';
+  const styleLine = narrationStyleLine(narrationStyle);
+  const prompt = `Create exactly 1 listening exercise for "${subject}", ${difficulty} difficulty.
+
+${styleLine}
+${avoidText}${ctx}
+
+Batch ID: ${seed}
+
+Return ONLY one JSON object:
+{
+  "listeningExerciseType": "${LISTENING_EXERCISE_TYPES}",
+  "type": "mcq or descriptive",
+  "question": "...",
+  "narrationText": "...",
+  "audioTranscript": "...",
+  "explanation": "...",
+  "topic": "...",
+  "options": ["A. ...","B. ...","C. ...","D. ..."],
+  "correctAnswer": 0,
+  "modelAnswer": "...",
+  "keyPoints": ["..."]
+}
+
+Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
+
+  const completion = await getGroq().chat.completions.create({
+    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.65,
+    max_tokens: 1200,
+  });
+  const text = completion.choices[0]?.message?.content?.trim();
+  let raw;
+  try {
+    raw = parseAiJsonObject(text);
+  } catch {
+    throw new Error('AI failed to generate listening question');
+  }
+  return normalizeListeningQuestion(raw, subject, replayLimit);
 };
 
 // ── AI Proctoring: analyze a webcam frame for violations ───────────────────
