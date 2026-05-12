@@ -69,10 +69,12 @@ export const processResourceDocument = async (resourceId) => {
   } catch (e) {
     if (e.code === 'LEGACY_PPT') {
       await fail(resourceId, 'UNSUPPORTED_FILE', 'Legacy .ppt format is not supported. Please save as .pptx and re-upload.');
+    } else if (e.code === 'PDF_NOT_SUPPORTED') {
+      await fail(resourceId, 'PDF_NOT_SUPPORTED', e.message || 'PDF is not supported. Save as Word (.docx) and upload again.');
     } else if (e.code === 'UNSUPPORTED_FORMAT') {
-      await fail(resourceId, 'UNSUPPORTED_FILE', 'This file type is not supported. Use PDF, DOCX, PPTX, or TXT.');
+      await fail(resourceId, 'UNSUPPORTED_FILE', 'This file type is not supported. Use DOCX, PPTX, or TXT.');
     } else {
-      await fail(resourceId, 'EXTRACTION_FAILED', 'Could not read text from this file. Try a text-based PDF or another format.');
+      await fail(resourceId, 'EXTRACTION_FAILED', 'Could not read text from this file. Try another export or format.');
     }
     return;
   }

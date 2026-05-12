@@ -32,9 +32,9 @@ export const extractTextFromResourceBuffer = async (buffer, originalName = '', m
   }
 
   if (ext === 'pdf' || mt === 'application/pdf') {
-    const { default: pdfParse } = await import('pdf-parse/lib/pdf-parse.js');
-    const data = await pdfParse(buffer);
-    return { text: data.text?.trim() || '', pages: data.numpages || 0, format: 'pdf' };
+    const err = new Error('PDF uploads are not supported. Save as Word (.docx) and upload again.');
+    err.code = 'PDF_NOT_SUPPORTED';
+    throw err;
   }
 
   if (ext === 'docx' || mt.includes('wordprocessingml')) {
@@ -81,5 +81,5 @@ export const extractTextFromResourceBuffer = async (buffer, originalName = '', m
 
 export const isSupportedResourceFilename = (originalName = '') => {
   const e = EXT(originalName);
-  return ['pdf', 'docx', 'doc', 'pptx', 'ppt', 'txt'].includes(e);
+  return ['docx', 'doc', 'pptx', 'ppt', 'txt'].includes(e);
 };

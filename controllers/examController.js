@@ -18,6 +18,7 @@ import {
   getBaseQuestionsForExam,
 } from '../utils/examShuffleRuntime.js';
 import crypto from 'crypto';
+import { createRequire } from 'module';
 import {
   analyzeProctoringImage,
   generateCodingQuestions, generateDescriptiveQuestions, generateGroundedExamQuestions, generateMCQs,
@@ -28,6 +29,10 @@ import { buildInstructorExamReportData } from '../utils/instructorExamReportData
 import { isCloudinaryConfigured, uploadScreenshot } from '../services/cloudinaryService.js';
 import logger from '../utils/logger.js';
 import { log, fromReq } from '../utils/activityLogger.js';
+import { extractTextFromResourceBuffer } from '../services/resourceTextExtraction.js';
+
+const require = createRequire(import.meta.url);
+const pdfParseLegacy = require('pdf-parse');
 
 const downloadBuffer = (url) => new Promise((resolve, reject) => {
   const lib = url.startsWith('https') ? https : http;
@@ -39,10 +44,10 @@ const downloadBuffer = (url) => new Promise((resolve, reject) => {
   }).on('error', reject);
 });
 
+/** Legacy PDF text for old exams/resources only; new resource uploads reject PDF. */
 const parsePDFBuffer = async (buffer) => {
-  const { default: pdfParse } = await import('pdf-parse/lib/pdf-parse.js');
-  const data = await pdfParse(buffer);
-  return data.text?.trim() || '';
+  const data = await pdfParseLegacy(buffer);
+  return (data.text || '').trim();
 };
 
 export const createExam = async (req, res, next) => {
@@ -153,12 +158,11 @@ export const createExam = async (req, res, next) => {
           if (ext === 'pdf' || (resource.mimetype || '').includes('pdf')) {
             text = (await parsePDFBuffer(buf)).slice(0, 60000);
           } else {
-            const { extractTextFromResourceBuffer } = await import('../services/resourceTextExtraction.js');
             const ex = await extractTextFromResourceBuffer(buf, resource.originalName, resource.mimetype);
             text = (ex.text || '').slice(0, 60000);
           }
           if (!text || text.length < 80) {
-            return next(new AppError('Could not read enough text from this resource. Try a text-based PDF or DOCX.', 422));
+            return next(new AppError('Could not read enough text from this resource. Try a DOCX or other supported format.', 422));
           }
           resolvedContextText = text;
           sourceResourceId = resource._id;
@@ -434,7 +438,6 @@ export const regenerateExam = async (req, res, next) => {
         if (ext === 'pdf' || (resource.mimetype || '').includes('pdf')) {
           text = (await parsePDFBuffer(buf)).slice(0, 60000);
         } else {
-          const { extractTextFromResourceBuffer } = await import('../services/resourceTextExtraction.js');
           const ex = await extractTextFromResourceBuffer(buf, resource.originalName, resource.mimetype);
           text = (ex.text || '').slice(0, 60000);
         }
@@ -553,18 +556,15 @@ export const parsePDF = async (req, res, next) => {
   try {
     if (!req.file) return next(new AppError('No file uploaded', 400));
 
-    // dynamic import to avoid top-level issues
-    const { default: pdfParse } = await import('pdf-parse/lib/pdf-parse.js');
-    const data = await pdfParse(req.file.buffer);
-
-    const text = data.text?.trim();
+    const data = await pdfParseLegacy(req.file.buffer);
+    const text = (data.text || '').trim();
     if (!text || text.length < 50) {
       return next(new AppError('Could not extract readable text from this PDF. Try a text-based PDF.', 422));
     }
 
     res.json({
       text: text.slice(0, 15000), // cap at 15k chars to avoid prompt overflow
-      pages: data.numpages,
+      pages: data.numpages || 0,
       chars: text.length,
     });
   } catch (err) {

@@ -31,6 +31,10 @@ const downloadBuffer = (url) => new Promise((resolve, reject) => {
 export const uploadResource = async (req, res, next) => {
   try {
     if (!req.file) return next(new AppError('No file uploaded', 400));
+    const lowerName = (req.file.originalname || '').toLowerCase();
+    if (lowerName.endsWith('.pdf') || req.file.mimetype === 'application/pdf') {
+      return next(new AppError('PDF is not supported. Save as Word (.docx) and upload again.', 400));
+    }
     const { title, groupId, subject: subjectRaw } = req.body;
     if (!title?.trim()) return next(new AppError('Title is required', 400));
     const subject = typeof subjectRaw === 'string' ? subjectRaw.trim().slice(0, 200) : '';
@@ -197,6 +201,9 @@ export const getResourceText = async (req, res, next) => {
     } catch (e) {
       if (e.code === 'LEGACY_PPT') {
         return next(new AppError('Legacy .ppt is not supported. Save as .pptx and upload again.', 422));
+      }
+      if (e.code === 'PDF_NOT_SUPPORTED') {
+        return next(new AppError(e.message || 'PDF is not supported. Save as Word (.docx) and upload again.', 422));
       }
       logger.warn(`[Resource] Text extract failed for ${resource._id}: ${e.message}`);
       return next(new AppError('Could not read text from this file.', 422));

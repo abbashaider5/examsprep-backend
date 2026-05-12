@@ -16,7 +16,6 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
   fileFilter: (_, file, cb) => {
     const allowed = [
-      'application/pdf',
       'application/msword',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       'application/vnd.openxmlformats-officedocument.presentationml.presentation',
