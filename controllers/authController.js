@@ -13,6 +13,11 @@ import OTPCode from '../models/OTPCode.js';
 import { getSettings } from '../models/SystemSettings.js';
 import { sendWelcomeEmail, sendOTPEmail, sendSecurityAlertEmail, sendPasswordResetEmail } from '../services/emailService.js';
 import { verifyRecaptchaToken } from '../services/recaptchaService.js';
+import {
+  computeExamUsageSnapshotWithEnterprise,
+  effectivePlanType,
+} from '../services/subscriptionUsageService.js';
+import { buildEnterpriseRenewalTimeline } from '../services/subscriptionLifecycleService.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
 
@@ -474,41 +479,88 @@ const sanitizeUser = (user) => ({
   autoRenew: !!user.autoRenew,
   planExpiresAt: user.planExpiresAt || null,
   planStatus: user.plan === 'free' ? 'free' : (user.planExpiresAt && user.planExpiresAt < new Date() ? 'expired' : 'active'),
-  remaining: user.getRemainingExams ? user.getRemainingExams() : null,
-  monthlyLimit: user.getMonthlyLimit ? user.getMonthlyLimit() : 3,
   lifetimeExamsCreated: user.lifetimeExamsCreated ?? 0,
 });
 
 async function buildUserResponse(user, req) {
-  const base = sanitizeUser(user);
+  const fresh = await User.findById(user._id);
+  if (!fresh) {
+    const base = sanitizeUser(user);
+    return { ...base, enterprise: null, impersonation: null };
+  }
+  const base = sanitizeUser(fresh);
+  base.plan = effectivePlanType(fresh);
   let enterprise = null;
-  if (user.enterpriseId) {
-    const ent = await Enterprise.findById(user.enterpriseId)
-      .select('name mode address examsPerTeacherLimit questionsPerExamLimit aiProctoringEnabled estimatedMonthlyCost')
+  if (fresh.enterpriseId) {
+    const ent = await Enterprise.findById(fresh.enterpriseId)
+      .select(
+        'name mode address examsPerTeacherLimit questionsPerExamLimit aiProctoringEnabled aiListeningEnabled '
+        + 'aiResourceProcessingEnabled codingExamsEnabled aiExamGenerationEnabled estimatedMonthlyCost estimatedMonthlyCostManualPaise '
+        + 'teacherLimit studentLimit orgPlanActive orgPlanStartedAt orgPlanExpiresAt orgPlanDurationMonths orgTrialEndsAt subscriptionRenewalQueue',
+      )
       .lean();
     if (ent) {
+      const teacherUsed = await User.countDocuments({ enterpriseId: ent._id, role: 'instructor' });
+      const monthlyBasePaise = (ent.estimatedMonthlyCostManualPaise != null && Number(ent.estimatedMonthlyCostManualPaise) >= 100)
+        ? Math.round(Number(ent.estimatedMonthlyCostManualPaise))
+        : Math.round(Number(ent.estimatedMonthlyCost) || 0);
       enterprise = {
         id: ent._id,
         name: ent.name,
         mode: ent.mode,
         address: ent.address || {},
+        teacherLimit: ent.teacherLimit,
+        teacherUsed,
+        studentLimit: ent.studentLimit ?? 2000,
         examsPerTeacherLimit: ent.examsPerTeacherLimit ?? 30,
         questionsPerExamLimit: ent.questionsPerExamLimit ?? 100,
         aiProctoringEnabled: ent.aiProctoringEnabled !== false,
+        aiListeningEnabled: ent.aiListeningEnabled !== false,
+        aiResourceProcessingEnabled: ent.aiResourceProcessingEnabled !== false,
+        codingExamsEnabled: ent.codingExamsEnabled !== false,
+        aiExamGenerationEnabled: ent.aiExamGenerationEnabled !== false,
         estimatedMonthlyCost: ent.estimatedMonthlyCost || 0,
+        estimatedMonthlyCostManualPaise: ent.estimatedMonthlyCostManualPaise ?? null,
+        billingMonthlyBasePaise: monthlyBasePaise,
+        orgPlanActive: !!ent.orgPlanActive,
+        orgPlanStartedAt: ent.orgPlanStartedAt || null,
+        orgPlanExpiresAt: ent.orgPlanExpiresAt || null,
+        orgPlanDurationMonths: ent.orgPlanDurationMonths ?? null,
+        orgTrialEndsAt: ent.orgTrialEndsAt || null,
+        subscriptionRenewalQueue: (ent.subscriptionRenewalQueue || [])
+          .filter((q) => q.status === 'pending')
+          .map((q) => ({
+            durationMonths: q.durationMonths,
+            activatesAt: q.activatesAt,
+            sequence: q.sequence,
+          })),
+        renewalTimeline: buildEnterpriseRenewalTimeline(ent).segments,
       };
-      if (user.role === 'instructor' || user.role === 'principal') {
-        base.monthlyLimit = enterprise.examsPerTeacherLimit;
-        base.remaining = Math.max(0, (enterprise.examsPerTeacherLimit || 0) - (user.examsCreatedThisMonth || 0));
-      }
     }
   }
+
+  const snap = await computeExamUsageSnapshotWithEnterprise(fresh);
+  if (snap) {
+    base.remaining = snap.remaining;
+    base.monthlyLimit = snap.totalCap;
+    base.examsUsedThisMonth = snap.usedThisMonth;
+    base.examsBaseIncluded = snap.baseMonthlyCap;
+    base.examsBonusSlots = snap.bonusSlots;
+  } else {
+    base.remaining = 0;
+    base.monthlyLimit = 0;
+  }
+  base.extraExamCreditsBalance = fresh.extraExamCreditsBalance || 0;
+  base.instructorTrialEndsAt = fresh.instructorTrialEndsAt || null;
+  base.instructorTrialUsed = !!fresh.instructorTrialUsed;
+  base.subscriptionBillingManagedByOrg = !!(fresh.enterpriseId && fresh.role !== 'principal' && fresh.role !== 'admin');
+
   let impersonation = null;
   if (req?.isImpersonating && req.sessionUser) {
     impersonation = {
       principalId: req.sessionUser._id,
       principalName: req.sessionUser.name,
-      viewingAs: { id: user._id, name: user.name, email: user.email },
+      viewingAs: { id: fresh._id, name: fresh.name, email: fresh.email },
     };
   }
   return { ...base, enterprise, impersonation };

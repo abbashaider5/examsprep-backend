@@ -17,6 +17,31 @@ export const cleanExtractedText = (raw) => {
   return deduped.join('\n').trim();
 };
 
+/**
+ * Extra normalization after Tesseract: OCR noise, odd breaks, and junk lines before chunking/embeddings.
+ */
+export const cleanOcrExtractedText = (raw) => {
+  if (!raw || typeof raw !== 'string') return '';
+  let t = raw.replace(/\r\n/g, '\n');
+  t = t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFEFF]/g, '');
+  t = t.replace(/\uFFFD/g, '');
+  t = t.replace(/[ \t]{2,}/g, ' ');
+  t = t.replace(/\n[ \t]+/g, '\n');
+  t = t.replace(/[ \t]+\n/g, '\n');
+  t = t.replace(/\n{3,}/g, '\n\n');
+  t = t.replace(/([a-z])-\n([a-z])/gi, '$1$2');
+  const lines = t
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => {
+      if (!l) return false;
+      if (/^[^\p{L}\p{N}\s]+$/u.test(l) && l.length < 48) return false;
+      if (/^[\-|_=•·]{3,}$/.test(l)) return false;
+      return true;
+    });
+  return cleanExtractedText(lines.join('\n'));
+};
+
 const looksLikeHeading = (line) => {
   if (!line || line.length > 160) return false;
   const md = line.match(/^(#{1,4})\s+(.+)/);

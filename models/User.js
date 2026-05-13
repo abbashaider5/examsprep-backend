@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
 
-export const PLAN_LIMITS = { free: 3, pro: 10, enterprise: 30 };
+export const PLAN_LIMITS = { free: 3, pro: 20, enterprise: 30 };
 export const PLAN_MAX_Q  = { free: 20, pro: 50, enterprise: 100 };
 
 const badgeSchema = new mongoose.Schema({
@@ -36,9 +36,28 @@ const userSchema = new mongoose.Schema({
   autoRenew: { type: Boolean, default: false },
   planExpiresAt: { type: Date, default: null },
   examsCreatedThisMonth: { type: Number, default: 0 },
+  /**
+   * Purchased add-on exam slots for the current paid period (calendar month usage still applies).
+   * Cleared when the personal paid plan lapses — does not extend plan end date.
+   */
+  extraExamCreditsBalance: { type: Number, default: 0 },
   /** Lifetime count of exams created; never decreased when a test is deleted (usage / analytics). */
   lifetimeExamsCreated: { type: Number, default: 0 },
   monthlyExamResetDate: { type: Date, default: null },
+
+  /** Independent instructor: queued paid renewals (FIFO). Does not replace active plan until expiry. */
+  subscriptionRenewalQueue: [{
+    durationMonths: { type: Number, required: true },
+    plan: { type: String, enum: ['pro', 'enterprise'], default: 'pro' },
+    activatesAt: { type: Date, required: true },
+    sequence: { type: Number, default: 0 },
+    razorpayOrderId: { type: String, default: '' },
+    transactionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Transaction' },
+    status: { type: String, enum: ['pending', 'applied'], default: 'pending' },
+  }],
+  /** One-time instructor trial (abuse guard). */
+  instructorTrialUsed: { type: Boolean, default: false },
+  instructorTrialEndsAt: { type: Date, default: null },
 
   // Gamification
   xp: { type: Number, default: 0 },
@@ -82,8 +101,10 @@ userSchema.methods.updateLevel = function () {
 
 /** Returns the currently active plan (falls back to 'free' if expired) */
 userSchema.methods.getEffectivePlan = function () {
+  const now = new Date();
+  if (this.instructorTrialEndsAt && this.instructorTrialEndsAt > now) return 'pro';
   if (this.plan === 'free') return 'free';
-  if (this.planExpiresAt && this.planExpiresAt < new Date()) return 'free';
+  if (this.planExpiresAt && this.planExpiresAt < now) return 'free';
   return this.plan;
 };
 

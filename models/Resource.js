@@ -21,6 +21,10 @@ const resourceSchema = new mongoose.Schema({
   processingStatus:  { type: String, enum: ['uploading', 'processing', 'ready', 'failed'], default: undefined },
   processingErrorCode:   { type: String, default: '' },
   processingErrorMessage:{ type: String, default: '' },
+  /** Short UX label while processing (e.g. OCR step); cleared when ready/failed */
+  processingStageLabel:  { type: String, default: '' },
+  /** Where processing stopped: extract | ocr | rasterize | prepare | index | download | upload | other */
+  processingFailedStage: { type: String, default: '' },
   chunkCount:        { type: Number, default: 0 },
   extractedCharCount:{ type: Number, default: 0 },
   /** Lightweight outline for chapter/topic UX (headings detected heuristically) */

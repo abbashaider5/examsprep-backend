@@ -52,6 +52,20 @@ const systemSettingsSchema = new mongoose.Schema({
 
   // Plan Pricing (in paise)
   planPricePro: { type: Number, default: 14900 },
+  /** Marketing reference “list” price per month (INR paise), e.g. ₹999 — used for savings UI. */
+  referPriceMonthlyInrPaise: { type: Number, default: 99900 },
+  /** Add-on AI exam credits (INR paise each); change without deploy. */
+  additionalExamCreditPricePaise: { type: Number, default: 9900 },
+  /** Included AI exams / calendar month by tier (override hardcoded defaults). */
+  examsIncludedFree: { type: Number, default: 3 },
+  examsIncludedPro: { type: Number, default: 20 },
+  examsIncludedEnterprise: { type: Number, default: 30 },
+  maxQuestionsFree: { type: Number, default: 20 },
+  maxQuestionsPro: { type: Number, default: 50 },
+  maxQuestionsEnterprise: { type: Number, default: 100 },
+  /** Optional JSON map of rough monthly cost drivers (INR, not paise) for transparency in pricing API. */
+  billingCostBasisInrMonthly: { type: mongoose.Schema.Types.Mixed, default: null },
+  billingPublicNotes: { type: String, default: '' },
 
   // Enterprise pricing configuration (in paise)
   enterpriseCostPerTeacher: { type: Number, default: 2000 },

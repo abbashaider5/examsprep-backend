@@ -11,7 +11,8 @@ const subscriptionSchema = new mongoose.Schema({
   currency: { type: String, default: 'INR' },
   startDate: { type: Date },
   endDate: { type: Date },
-  billingCycle: { type: String, enum: ['monthly'], default: 'monthly' },
+  billingCycle: { type: String, enum: ['monthly', 'multi'], default: 'monthly' },
+  durationMonths: { type: Number, default: 1 },
 }, { timestamps: true });
 
 subscriptionSchema.index({ user: 1, status: 1 });

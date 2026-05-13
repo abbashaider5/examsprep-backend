@@ -20,13 +20,16 @@ export const errorHandler = (err, req, res, next) => {
     ? 'Internal server error'
     : err.message || 'Internal server error';
 
-  res.status(status).json({ message });
+  const payload = { message };
+  if (err.publicCode) payload.code = err.publicCode;
+  res.status(status).json(payload);
 };
 
 export class AppError extends Error {
-  constructor(message, statusCode) {
+  constructor(message, statusCode, opts = {}) {
     super(message);
     this.statusCode = statusCode;
+    this.publicCode = opts.code || null;
     Error.captureStackTrace(this, this.constructor);
   }
 }

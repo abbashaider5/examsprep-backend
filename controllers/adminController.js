@@ -232,6 +232,7 @@ export const updateUserPlan = async (req, res, next) => {
     user.plan = plan;
     if (plan === 'free') {
       user.planExpiresAt = null;
+      user.extraExamCreditsBalance = 0;
     } else {
       const expiry = new Date();
       expiry.setMonth(expiry.getMonth() + Number(months));

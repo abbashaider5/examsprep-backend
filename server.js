@@ -1,3 +1,9 @@
+import dns from 'node:dns';
+/** Prefer IPv4 before first outbound connections (helps Cloudinary/CDN on some Windows dual-stack setups). */
+if (typeof dns.setDefaultResultOrder === 'function') {
+  dns.setDefaultResultOrder('ipv4first');
+}
+
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import dotenv from 'dotenv';

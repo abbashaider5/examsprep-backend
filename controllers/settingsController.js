@@ -21,6 +21,16 @@ export const updateSystemSettings = async (req, res, next) => {
       'certShowQRCode', 'certShowProctoredBadge', 'certShowInstructorName',
       'certPrimaryColor', 'certAccentColor', 'certOrganizationName', 'certFooterText',
       'planPricePro',
+      'referPriceMonthlyInrPaise',
+      'additionalExamCreditPricePaise',
+      'examsIncludedFree',
+      'examsIncludedPro',
+      'examsIncludedEnterprise',
+      'maxQuestionsFree',
+      'maxQuestionsPro',
+      'maxQuestionsEnterprise',
+      'billingCostBasisInrMonthly',
+      'billingPublicNotes',
       'enterpriseCostPerTeacher', 'enterpriseCostPerExam', 'enterpriseCostPerQuestion', 'enterpriseCostAiProctoring',
     ];
 

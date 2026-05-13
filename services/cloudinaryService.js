@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { v2 as cloudinary } from 'cloudinary';
 import logger from '../utils/logger.js';
+import { downloadUrlToBuffer } from '../utils/downloadUrlToBuffer.js';
 
 let _configured = false;
 
@@ -198,6 +199,84 @@ export const uploadAuthenticatedExamAudio = async (buffer, mimetype = 'audio/wav
     logger.error(`[Cloudinary] Exam audio upload failed: ${err.message}`);
     return null;
   }
+};
+
+/**
+ * Download a resource file from Cloudinary for server-side processing.
+ * Tries the stored secure_url first, then a freshly signed raw URL (helps strict / CDN edge cases).
+ * @param {{ cloudinaryUrl?: string, cloudinaryPublicId?: string }} opts
+ * @returns {Promise<Buffer>}
+ */
+export const downloadStoredResourceBuffer = async (opts = {}) => {
+  const { cloudinaryUrl = '', cloudinaryPublicId = '' } = opts;
+  let lastErr = new Error('No Cloudinary URL available');
+
+  const tryDownload = async (label, url) => {
+    if (!url || typeof url !== 'string' || !url.startsWith('http')) return;
+    try {
+      return await downloadUrlToBuffer(url.trim());
+    } catch (e) {
+      lastErr = e;
+      logger.warn(`[Cloudinary] ${label} download failed: ${e.message}`);
+    }
+    return null;
+  };
+
+  const direct = await tryDownload('Stored URL', cloudinaryUrl);
+  if (direct) return direct;
+
+  if (isCloudinaryConfigured() && cloudinaryPublicId && typeof cloudinaryPublicId === 'string') {
+    configure();
+
+    try {
+      const meta = await new Promise((resolve, reject) => {
+        cloudinary.api.resource(cloudinaryPublicId, { resource_type: 'raw' }, (err, result) => {
+          if (err) reject(err);
+          else resolve(result);
+        });
+      });
+      const freshUrl = meta?.secure_url || meta?.url;
+      const apiBuf = await tryDownload('API metadata secure_url', freshUrl);
+      if (apiBuf) return apiBuf;
+    } catch (e) {
+      lastErr = e;
+      logger.warn(`[Cloudinary] api.resource failed: ${e.message}`);
+    }
+
+    const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+    let signed;
+    try {
+      signed = cloudinary.url(cloudinaryPublicId, {
+        resource_type: 'raw',
+        type: 'upload',
+        secure: true,
+        sign_url: true,
+        expires_at: expiresAt,
+      });
+    } catch (e) {
+      lastErr = e;
+      logger.warn(`[Cloudinary] Could not build signed raw URL: ${e.message}`);
+    }
+    const signedBuf = await tryDownload('Signed raw URL (exp)', signed);
+    if (signedBuf) return signedBuf;
+
+    let signedNoExp;
+    try {
+      signedNoExp = cloudinary.url(cloudinaryPublicId, {
+        resource_type: 'raw',
+        type: 'upload',
+        secure: true,
+        sign_url: true,
+      });
+    } catch (e) {
+      lastErr = e;
+      logger.warn(`[Cloudinary] Could not build signed raw URL (no exp): ${e.message}`);
+    }
+    const signed2 = await tryDownload('Signed raw URL (no exp)', signedNoExp);
+    if (signed2) return signed2;
+  }
+
+  throw lastErr;
 };
 
 /** Signed short-lived URL for authenticated audio on Cloudinary */

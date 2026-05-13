@@ -13,9 +13,10 @@ import { protect } from '../middleware/auth.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB (PDF OCR safety limits apply during processing)
   fileFilter: (_, file, cb) => {
     const allowed = [
+      'application/pdf',
       'application/msword',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       'application/vnd.openxmlformats-officedocument.presentationml.presentation',

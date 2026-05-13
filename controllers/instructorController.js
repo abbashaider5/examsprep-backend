@@ -9,11 +9,12 @@ import SchoolClass from '../models/SchoolClass.js';
 import SchoolClassEnrollment from '../models/SchoolClassEnrollment.js';
 import User from '../models/User.js';
 import UserExamShuffle from '../models/UserExamShuffle.js';
+import Enterprise from '../models/Enterprise.js';
 import { PROCTORING_SCREENSHOT_RETENTION_DAYS } from '../services/proctoringScreenshotRetention.js';
 import { buildInstructorExamReportData } from '../utils/instructorExamReportData.js';
 import { buildDisplayQuestions, getBaseQuestionsForExam } from '../utils/examShuffleRuntime.js';
 import { getSettings } from '../models/SystemSettings.js';
-import Enterprise from '../models/Enterprise.js';
+import { addMonthsClamped } from '../services/subscriptionLifecycleService.js';
 import { sendInstructorInviteEmail } from '../services/emailService.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
 import { fromReq, log } from '../utils/activityLogger.js';
@@ -61,8 +62,23 @@ export const becomeInstructor = async (req, res, next) => {
     if (user.role === 'instructor') return res.json({ message: 'Already an instructor', role: 'instructor' });
     if (user.role === 'admin') return next(new AppError('Admins cannot change role', 400));
 
-    if (user.getEffectivePlan() === 'free') {
-      return next(new AppError('Active premium plan required to become an instructor.', 403));
+    const now = new Date();
+    const trialActive = user.instructorTrialEndsAt && user.instructorTrialEndsAt > now;
+
+    if (user.getEffectivePlan() === 'free' && !trialActive) {
+      if (user.enterpriseId) {
+        return next(new AppError('Your organization controls licensing. Contact your principal or administrator.', 403));
+      }
+      if (user.instructorTrialUsed) {
+        return next(new AppError('Active premium plan required to become an instructor.', 403));
+      }
+      const trialEnd = addMonthsClamped(now, 1);
+      user.instructorTrialUsed = true;
+      user.instructorTrialEndsAt = trialEnd;
+      user.plan = 'pro';
+      user.planExpiresAt = trialEnd;
+      user.examsCreatedThisMonth = 0;
+      user.monthlyExamResetDate = now;
     }
 
     user.role = 'instructor';

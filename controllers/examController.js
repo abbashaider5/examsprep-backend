@@ -1,15 +1,15 @@
-import http from 'http';
-import https from 'https';
 import { AppError } from '../middleware/errorHandler.js';
 import Exam from '../models/Exam.js';
 import ExamInvite from '../models/ExamInvite.js';
 import Group from '../models/Group.js';
 import Enterprise from '../models/Enterprise.js';
+import { enterpriseSubscriptionIsActive } from '../services/subscriptionLifecycleService.js';
 import Resource from '../models/Resource.js';
 import ResourceChunk from '../models/ResourceChunk.js';
 import { retrieveGroundingContext } from '../services/resourceRetrievalService.js';
 import { enqueueResourceProcessing } from '../services/resourceProcessingService.js';
 import Screenshot from '../models/Screenshot.js';
+import User from '../models/User.js';
 import UserExamShuffle from '../models/UserExamShuffle.js';
 import {
   buildDisplayQuestions,
@@ -18,7 +18,6 @@ import {
   getBaseQuestionsForExam,
 } from '../utils/examShuffleRuntime.js';
 import crypto from 'crypto';
-import { createRequire } from 'module';
 import {
   analyzeProctoringImage,
   generateCodingQuestions, generateDescriptiveQuestions, generateGroundedExamQuestions, generateListeningExamQuestions,
@@ -27,31 +26,24 @@ import {
 } from '../services/aiService.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
 import { buildInstructorExamReportData } from '../utils/instructorExamReportData.js';
-import { isCloudinaryConfigured, signedAuthenticatedMediaUrl, uploadScreenshot } from '../services/cloudinaryService.js';
+import { isCloudinaryConfigured, signedAuthenticatedMediaUrl, uploadScreenshot, downloadStoredResourceBuffer } from '../services/cloudinaryService.js';
 import { interleaveListeningEvenly, synthesizeAndAttachListeningAudio } from '../services/examListeningService.js';
 import { isCambAiTtsConfigured, synthesizeExamNarration } from '../services/tts/ttsService.js';
 import { previewSampleTextForStyle, voiceMetaFromAccent } from '../utils/listeningVoicePresets.js';
 import logger from '../utils/logger.js';
 import { log, fromReq } from '../utils/activityLogger.js';
+import { cleanExtractedText, cleanOcrExtractedText } from '../services/resourceChunkingService.js';
 import { extractTextFromResourceBuffer } from '../services/resourceTextExtraction.js';
+import {
+  computeExamUsageSnapshot,
+  consumeExamGenerationSlots,
+  effectivePlanTypeWithEnterprise,
+  getMaxQuestionsForUser,
+} from '../services/subscriptionUsageService.js';
 
-const require = createRequire(import.meta.url);
-const pdfParseLegacy = require('pdf-parse');
-
-const downloadBuffer = (url) => new Promise((resolve, reject) => {
-  const lib = url.startsWith('https') ? https : http;
-  lib.get(url, (res) => {
-    const chunks = [];
-    res.on('data', (c) => chunks.push(c));
-    res.on('end', () => resolve(Buffer.concat(chunks)));
-    res.on('error', reject);
-  }).on('error', reject);
-});
-
-/** Legacy PDF text for old exams/resources only; new resource uploads reject PDF. */
-const parsePDFBuffer = async (buffer) => {
-  const data = await pdfParseLegacy(buffer);
-  return (data.text || '').trim();
+const normalizeExtractedForExam = (ex) => {
+  const raw = ex?.text || '';
+  return ex?.usedOcr ? cleanOcrExtractedText(raw) : cleanExtractedText(raw);
 };
 
 export const createExam = async (req, res, next) => {
@@ -64,42 +56,47 @@ export const createExam = async (req, res, next) => {
       examType = 'mcq', timePerQuestion, contextText, resourceId,
       mixedMcqPercent,
     } = req.body;
-    const user = req.user;
+    const user = await User.findById(req.user._id);
+    if (!user) return next(new AppError('User not found', 401));
 
     const multipleSets = Boolean(req.body.multipleSets);
     let enterpriseConfig = null;
     if (user.enterpriseId && (user.role === 'instructor' || user.role === 'principal')) {
       enterpriseConfig = await Enterprise.findById(user.enterpriseId)
-        .select('examsPerTeacherLimit questionsPerExamLimit aiProctoringEnabled')
+        .select('examsPerTeacherLimit questionsPerExamLimit aiProctoringEnabled orgPlanExpiresAt orgTrialEndsAt')
         .lean();
     }
     const usageMultiplier = multipleSets ? 3 : 1;
-    user._syncMonthly();
-    const monthlyLimit = enterpriseConfig?.examsPerTeacherLimit || user.getMonthlyLimit();
-    const used = user.examsCreatedThisMonth || 0;
-    if (used + usageMultiplier > monthlyLimit) {
+    const orgActive = enterpriseSubscriptionIsActive(enterpriseConfig);
+    const entExamCap = (user.enterpriseId && (user.role === 'instructor' || user.role === 'principal') && orgActive)
+      ? enterpriseConfig?.examsPerTeacherLimit
+      : null;
+    const usageSnap = await computeExamUsageSnapshot(user._id, entExamCap ?? null);
+    if (!usageSnap) return next(new AppError('Could not verify usage limits.', 500));
+    if (usageSnap.remaining < usageMultiplier) {
       return next(new AppError(
         multipleSets
-          ? `Multiple Sets uses 3 of your monthly test slots. You need ${usageMultiplier} free slot(s) but only have ${Math.max(0, monthlyLimit - used)} remaining (${monthlyLimit} on ${user.getEffectivePlan()} plan).`
-          : `Monthly exam limit reached (${monthlyLimit} on ${user.getEffectivePlan()} plan). Upgrade your plan or wait until next month.`,
+          ? `Multiple Sets uses ${usageMultiplier} of your monthly test slots. You need ${usageMultiplier} free slot(s) but only have ${usageSnap.remaining} remaining.`
+          : 'You have reached your exam generation limit for this billing period.',
         429,
+        { code: 'EXAM_LIMIT_REACHED' },
       ));
     }
 
-    const maxQ = enterpriseConfig?.questionsPerExamLimit || user.getMaxQuestions();
+    const maxQ = await getMaxQuestionsForUser(user, enterpriseConfig?.questionsPerExamLimit ?? null);
     const requestedQ = Number(numQuestions);
     if (requestedQ > maxQ) {
-      return next(new AppError(`Your ${user.getEffectivePlan()} plan allows up to ${maxQ} questions per exam.`, 403));
+      return next(new AppError(`Your plan allows up to ${maxQ} questions per exam.`, 403));
     }
 
     if (proctored && enterpriseConfig && enterpriseConfig.aiProctoringEnabled === false) {
       return next(new AppError('AI Proctoring is not enabled in your enterprise plan. Please contact your administrator.', 403));
     }
-    if (proctored && !enterpriseConfig && !user.canUseProctoring()) {
+    if (proctored && !['pro', 'enterprise'].includes(effectivePlanTypeWithEnterprise(user, enterpriseConfig))) {
       return next(new AppError('AI Proctoring requires a Pro or Enterprise plan.', 403));
     }
 
-    if (enableCoding && user.getEffectivePlan() !== 'enterprise') {
+    if (enableCoding && effectivePlanTypeWithEnterprise(user, enterpriseConfig) !== 'enterprise') {
       return next(new AppError('Coding questions require an Enterprise plan.', 403));
     }
 
@@ -109,7 +106,7 @@ export const createExam = async (req, res, next) => {
 
     if (resourceId && !(enableCoding || examType === 'coding')) {
       const resource = await Resource.findById(resourceId).select(
-        'cloudinaryUrl title scope uploadedBy subject processingStatus processingErrorMessage chunkCount mimetype originalName',
+        'cloudinaryUrl cloudinaryPublicId title scope uploadedBy subject processingStatus processingErrorMessage chunkCount mimetype originalName',
       );
       if (!resource) {
         return next(new AppError('Resource not found', 404));
@@ -156,15 +153,12 @@ export const createExam = async (req, res, next) => {
       } else if (resource.cloudinaryUrl) {
         // Legacy resources (no vector index yet): one-shot text extraction, then queue indexing for next time
         try {
-          const buf = await downloadBuffer(resource.cloudinaryUrl);
-          const ext = resource.originalName?.split('.').pop()?.toLowerCase() || 'pdf';
-          let text = '';
-          if (ext === 'pdf' || (resource.mimetype || '').includes('pdf')) {
-            text = (await parsePDFBuffer(buf)).slice(0, 60000);
-          } else {
-            const ex = await extractTextFromResourceBuffer(buf, resource.originalName, resource.mimetype);
-            text = (ex.text || '').slice(0, 60000);
-          }
+          const buf = await downloadStoredResourceBuffer({
+            cloudinaryUrl: resource.cloudinaryUrl,
+            cloudinaryPublicId: resource.cloudinaryPublicId,
+          });
+          const ex = await extractTextFromResourceBuffer(buf, resource.originalName, resource.mimetype);
+          const text = normalizeExtractedForExam(ex).slice(0, 60000);
           if (!text || text.length < 80) {
             return next(new AppError('Could not read enough text from this resource. Try a DOCX or other supported format.', 422));
           }
@@ -334,11 +328,15 @@ export const createExam = async (req, res, next) => {
         : undefined,
     });
 
-    user.examsCreatedThisMonth = used + usageMultiplier;
-    user.lifetimeExamsCreated = (user.lifetimeExamsCreated || 0) + usageMultiplier;
-    user.examCreationsToday = (user.examCreationsToday || 0) + 1;
-    user.lastExamCreationDate = new Date();
-    await user.save({ validateBeforeSave: false });
+    const updatedUser = await consumeExamGenerationSlots(user._id, usageMultiplier, entExamCap ?? null);
+    if (!updatedUser) {
+      await Exam.deleteOne({ _id: exam._id });
+      return next(new AppError(
+        'Your exam generation limit was reached while creating this test. Please try again or upgrade your plan.',
+        429,
+        { code: 'EXAM_LIMIT_REACHED' },
+      ));
+    }
 
     await log({
       user,
@@ -530,19 +528,16 @@ export const regenerateExam = async (req, res, next) => {
         });
       } else {
         /* legacy exam + resource */
-        const resource = await Resource.findById(exam.sourceResource).select('cloudinaryUrl originalName mimetype');
+        const resource = await Resource.findById(exam.sourceResource).select('cloudinaryUrl cloudinaryPublicId originalName mimetype');
         if (!resource?.cloudinaryUrl) {
           return next(new AppError('Linked resource file is missing.', 404));
         }
-        const buf = await downloadBuffer(resource.cloudinaryUrl);
-        const ext = resource.originalName?.split('.').pop()?.toLowerCase() || 'pdf';
-        let text = '';
-        if (ext === 'pdf' || (resource.mimetype || '').includes('pdf')) {
-          text = (await parsePDFBuffer(buf)).slice(0, 60000);
-        } else {
-          const ex = await extractTextFromResourceBuffer(buf, resource.originalName, resource.mimetype);
-          text = (ex.text || '').slice(0, 60000);
-        }
+        const buf = await downloadStoredResourceBuffer({
+          cloudinaryUrl: resource.cloudinaryUrl,
+          cloudinaryPublicId: resource.cloudinaryPublicId,
+        });
+        const ex = await extractTextFromResourceBuffer(buf, resource.originalName, resource.mimetype);
+        const text = normalizeExtractedForExam(ex).slice(0, 60000);
         if (!text || text.length < 40) {
           return next(new AppError('Could not extract text from linked resource.', 422));
         }
@@ -843,16 +838,21 @@ export const parsePDF = async (req, res, next) => {
   try {
     if (!req.file) return next(new AppError('No file uploaded', 400));
 
-    const data = await pdfParseLegacy(req.file.buffer);
-    const text = (data.text || '').trim();
+    const ex = await extractTextFromResourceBuffer(
+      req.file.buffer,
+      req.file.originalname || 'upload.pdf',
+      req.file.mimetype || 'application/pdf',
+    );
+    const text = normalizeExtractedForExam(ex);
     if (!text || text.length < 50) {
-      return next(new AppError('Could not extract readable text from this PDF. Try a text-based PDF.', 422));
+      return next(new AppError('Could not extract readable text from this PDF. Try a clearer scan or text-based PDF.', 422));
     }
 
     res.json({
       text: text.slice(0, 15000), // cap at 15k chars to avoid prompt overflow
-      pages: data.numpages || 0,
+      pages: ex.pages || 0,
       chars: text.length,
+      usedOcr: Boolean(ex.usedOcr),
     });
   } catch (err) {
     next(err);

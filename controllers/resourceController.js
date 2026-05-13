@@ -1,10 +1,9 @@
-import https from 'https';
-import http from 'http';
 import { AppError } from '../middleware/errorHandler.js';
 import Group from '../models/Group.js';
 import Resource from '../models/Resource.js';
 import ResourceChunk from '../models/ResourceChunk.js';
-import { deleteCloudinaryResource, uploadResourceFile } from '../services/cloudinaryService.js';
+import { deleteCloudinaryResource, downloadStoredResourceBuffer, uploadResourceFile } from '../services/cloudinaryService.js';
+import { cleanExtractedText, cleanOcrExtractedText } from '../services/resourceChunkingService.js';
 import { enqueueResourceProcessing } from '../services/resourceProcessingService.js';
 import { extractTextFromResourceBuffer } from '../services/resourceTextExtraction.js';
 import logger from '../utils/logger.js';
@@ -16,25 +15,11 @@ function canUseInstructorResourceApis(user) {
   return Boolean(user.isInstructor) || ['instructor', 'principal'].includes(user.role);
 }
 
-// Download a file from a URL and return its buffer
-const downloadBuffer = (url) => new Promise((resolve, reject) => {
-  const lib = url.startsWith('https') ? https : http;
-  lib.get(url, (res) => {
-    const chunks = [];
-    res.on('data', (c) => chunks.push(c));
-    res.on('end', () => resolve(Buffer.concat(chunks)));
-    res.on('error', reject);
-  }).on('error', reject);
-});
-
 // ── Upload a resource (admin or instructor) ────────────────────────────────
 export const uploadResource = async (req, res, next) => {
   try {
     if (!req.file) return next(new AppError('No file uploaded', 400));
     const lowerName = (req.file.originalname || '').toLowerCase();
-    if (lowerName.endsWith('.pdf') || req.file.mimetype === 'application/pdf') {
-      return next(new AppError('PDF is not supported. Save as Word (.docx) and upload again.', 400));
-    }
     const { title, groupId, subject: subjectRaw } = req.body;
     if (!title?.trim()) return next(new AppError('Title is required', 400));
     const subject = typeof subjectRaw === 'string' ? subjectRaw.trim().slice(0, 200) : '';
@@ -174,7 +159,7 @@ export const deleteResource = async (req, res, next) => {
 export const getResourceText = async (req, res, next) => {
   try {
     const resource = await Resource.findById(req.params.id)
-      .select('cloudinaryUrl title scope group uploadedBy mimetype originalName');
+      .select('cloudinaryUrl cloudinaryPublicId title scope group uploadedBy mimetype originalName');
     if (!resource) return next(new AppError('Resource not found', 404));
 
     const isAdmin = req.user.role === 'admin';
@@ -190,20 +175,31 @@ export const getResourceText = async (req, res, next) => {
     }
 
     // Download file from Cloudinary and parse text on demand
-    const buffer = await downloadBuffer(resource.cloudinaryUrl);
+    const buffer = await downloadStoredResourceBuffer({
+      cloudinaryUrl: resource.cloudinaryUrl,
+      cloudinaryPublicId: resource.cloudinaryPublicId,
+    });
 
     let text = '';
     let pages = 0;
     try {
       const extracted = await extractTextFromResourceBuffer(buffer, resource.originalName, resource.mimetype);
-      text = (extracted.text || '').slice(0, 60000);
+      const raw = extracted.text || '';
+      const normalized = extracted.usedOcr ? cleanOcrExtractedText(raw) : cleanExtractedText(raw);
+      text = normalized.slice(0, 60000);
       pages = extracted.pages || 0;
     } catch (e) {
       if (e.code === 'LEGACY_PPT') {
         return next(new AppError('Legacy .ppt is not supported. Save as .pptx and upload again.', 422));
       }
       if (e.code === 'PDF_NOT_SUPPORTED') {
-        return next(new AppError(e.message || 'PDF is not supported. Save as Word (.docx) and upload again.', 422));
+        return next(new AppError(e.message || 'This PDF could not be processed.', 422));
+      }
+      if (e.code === 'PDF_TOO_LARGE_FOR_OCR') {
+        return next(new AppError(e.message || 'PDF is too large for OCR.', 422));
+      }
+      if (e.code === 'OCR_TIMEOUT' || e.code === 'OCR_FAILED' || e.code === 'OCR_PAGE_TIMEOUT') {
+        return next(new AppError(e.message || 'OCR could not read this PDF.', 422));
       }
       logger.warn(`[Resource] Text extract failed for ${resource._id}: ${e.message}`);
       return next(new AppError('Could not read text from this file.', 422));
@@ -221,7 +217,7 @@ export const getResourceText = async (req, res, next) => {
 export const getResourceProcessingStatus = async (req, res, next) => {
   try {
     const resource = await Resource.findById(req.params.id).select(
-      'title processingStatus processingErrorCode processingErrorMessage chunkCount extractedCharCount structureOutline processedAt scope uploadedBy embeddingModel pages',
+      'title processingStatus processingStageLabel processingFailedStage processingErrorCode processingErrorMessage chunkCount extractedCharCount structureOutline processedAt scope uploadedBy embeddingModel pages',
     );
     if (!resource) return next(new AppError('Resource not found', 404));
 
@@ -236,6 +232,7 @@ export const getResourceProcessingStatus = async (req, res, next) => {
 
     res.json({
       processingStatus,
+      processingStageLabel: resource.processingStageLabel || '',
       chunkCount: resource.chunkCount || 0,
       extractedCharCount: resource.extractedCharCount || 0,
       pages: resource.pages || 0,
@@ -245,6 +242,7 @@ export const getResourceProcessingStatus = async (req, res, next) => {
       error: resource.processingStatus === 'failed' ? {
         code: resource.processingErrorCode || 'FAILED',
         message: resource.processingErrorMessage || 'Processing failed.',
+        stage: resource.processingFailedStage || undefined,
       } : null,
     });
   } catch (err) { next(err); }
@@ -267,6 +265,8 @@ export const retryResourceProcessing = async (req, res, next) => {
       processingStatus: 'processing',
       processingErrorCode: '',
       processingErrorMessage: '',
+      processingStageLabel: 'Reading your resource…',
+      processingFailedStage: '',
     });
 
     enqueueResourceProcessing(resource._id);

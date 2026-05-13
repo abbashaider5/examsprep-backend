@@ -22,6 +22,7 @@ import {
 import ActivityLog from '../models/ActivityLog.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import { sendEnterprisePrincipalWelcomeEmail, sendEnterpriseTeacherInviteEmail } from '../services/emailService.js';
+import { addMonthsClamped } from '../services/subscriptionLifecycleService.js';
 
 function canManageSchoolClass(cls, reqUser, ent) {
   if (!cls || !ent) return false;
@@ -105,9 +106,17 @@ export const adminCreateEnterprise = async (req, res, next) => {
       address = {},
       mode,
       teacherLimit = 5,
+      studentLimit = 2000,
       examsPerTeacherLimit = 30,
       questionsPerExamLimit = 100,
       aiProctoringEnabled = true,
+      aiListeningEnabled = true,
+      aiResourceProcessingEnabled = true,
+      codingExamsEnabled = true,
+      aiExamGenerationEnabled = true,
+      estimatedMonthlyCostManualPaise: manualPaiseBody,
+      orgPlanDurationMonths,
+      orgTrialDays = 0,
       principalName,
       principalEmail,
     } = req.body;
@@ -119,11 +128,21 @@ export const adminCreateEnterprise = async (req, res, next) => {
       return next(new AppError('Principal name and email are required', 400));
     }
 
+    const studentLim = Math.max(1, Math.min(500000, Number(studentLimit) || 2000));
+    const orgDur = [1, 3, 6].includes(Number(orgPlanDurationMonths)) ? Number(orgPlanDurationMonths) : null;
+    const trialDays = Math.max(0, Math.min(90, Math.floor(Number(orgTrialDays) || 0)));
     const lim = Math.max(1, Math.min(500, Number(teacherLimit) || 5));
     const examLim = Math.max(1, Math.min(500, Number(examsPerTeacherLimit) || 30));
     const qLim = Math.max(5, Math.min(500, Number(questionsPerExamLimit) || 100));
     const pEmail = principalEmail.toLowerCase().trim();
     const aiEnabled = aiProctoringEnabled !== false;
+    const listenOn = aiListeningEnabled !== false;
+    const resourceOn = aiResourceProcessingEnabled !== false;
+    const codingOn = codingExamsEnabled !== false;
+    const genOn = aiExamGenerationEnabled !== false;
+    const manualPaise = manualPaiseBody != null && manualPaiseBody !== '' && Number(manualPaiseBody) >= 100
+      ? Math.round(Number(manualPaiseBody))
+      : null;
     const estimatedMonthlyCost = await computeEnterpriseMonthlyCost({
       teacherLimit: lim,
       examsPerTeacherLimit: examLim,
@@ -164,17 +183,38 @@ export const adminCreateEnterprise = async (req, res, next) => {
       },
       mode,
       teacherLimit: lim,
+      studentLimit: studentLim,
       examsPerTeacherLimit: examLim,
       questionsPerExamLimit: qLim,
       aiProctoringEnabled: aiEnabled,
+      aiListeningEnabled: listenOn,
+      aiResourceProcessingEnabled: resourceOn,
+      codingExamsEnabled: codingOn,
+      aiExamGenerationEnabled: genOn,
       estimatedMonthlyCost,
+      estimatedMonthlyCostManualPaise: manualPaise,
       principalUser: principal._id,
       createdBy: req.user._id,
     });
 
+    const start = new Date();
+    if (orgDur) {
+      enterprise.orgPlanStartedAt = start;
+      enterprise.orgPlanDurationMonths = orgDur;
+      enterprise.orgPlanExpiresAt = addMonthsClamped(start, orgDur);
+      enterprise.orgPlanActive = true;
+    }
+    if (trialDays > 0) {
+      enterprise.orgTrialEndsAt = new Date(start.getTime() + trialDays * 86400000);
+      enterprise.orgPlanActive = true;
+    }
+    await enterprise.save();
+
     principal.role = 'principal';
     principal.enterpriseId = enterprise._id;
     if (principal.plan === 'free') principal.plan = 'enterprise';
+    if (enterprise.orgPlanExpiresAt) principal.planExpiresAt = enterprise.orgPlanExpiresAt;
+    else if (enterprise.orgTrialEndsAt) principal.planExpiresAt = enterprise.orgTrialEndsAt;
     await principal.save({ validateBeforeSave: false });
 
     await log({
@@ -256,6 +296,32 @@ export const adminUpdateEnterprise = async (req, res, next) => {
     if (req.body.examsPerTeacherLimit !== undefined) ent.examsPerTeacherLimit = Math.max(1, Math.min(500, Number(req.body.examsPerTeacherLimit) || ent.examsPerTeacherLimit));
     if (req.body.questionsPerExamLimit !== undefined) ent.questionsPerExamLimit = Math.max(5, Math.min(500, Number(req.body.questionsPerExamLimit) || ent.questionsPerExamLimit));
     if (req.body.aiProctoringEnabled !== undefined) ent.aiProctoringEnabled = req.body.aiProctoringEnabled !== false;
+    if (req.body.aiListeningEnabled !== undefined) ent.aiListeningEnabled = req.body.aiListeningEnabled !== false;
+    if (req.body.aiResourceProcessingEnabled !== undefined) ent.aiResourceProcessingEnabled = req.body.aiResourceProcessingEnabled !== false;
+    if (req.body.codingExamsEnabled !== undefined) ent.codingExamsEnabled = req.body.codingExamsEnabled !== false;
+    if (req.body.aiExamGenerationEnabled !== undefined) ent.aiExamGenerationEnabled = req.body.aiExamGenerationEnabled !== false;
+    if (req.body.estimatedMonthlyCostManualPaise !== undefined) {
+      const v = req.body.estimatedMonthlyCostManualPaise;
+      ent.estimatedMonthlyCostManualPaise = (v === null || v === '')
+        ? null
+        : Math.max(100, Math.round(Number(v)));
+    }
+    if (req.body.studentLimit !== undefined) {
+      ent.studentLimit = Math.max(1, Math.min(500000, Number(req.body.studentLimit) || ent.studentLimit));
+    }
+    if (req.body.orgPlanDurationMonths !== undefined) {
+      const om = Number(req.body.orgPlanDurationMonths);
+      if ([1, 3, 6].includes(om)) ent.orgPlanDurationMonths = om;
+    }
+    if (req.body.orgPlanExpiresAt !== undefined && req.body.orgPlanExpiresAt) {
+      const d = new Date(req.body.orgPlanExpiresAt);
+      if (!Number.isNaN(d.getTime())) ent.orgPlanExpiresAt = d;
+    }
+    if (req.body.orgTrialEndsAt !== undefined && req.body.orgTrialEndsAt) {
+      const d = new Date(req.body.orgTrialEndsAt);
+      if (!Number.isNaN(d.getTime())) ent.orgTrialEndsAt = d;
+    }
+    if (req.body.orgPlanActive !== undefined) ent.orgPlanActive = !!req.body.orgPlanActive;
 
     ent.estimatedMonthlyCost = await computeEnterpriseMonthlyCost({
       teacherLimit: ent.teacherLimit,
@@ -265,6 +331,14 @@ export const adminUpdateEnterprise = async (req, res, next) => {
     });
 
     await ent.save();
+
+    const principal = await User.findById(ent.principalUser);
+    if (principal && ent.orgPlanExpiresAt) {
+      principal.planExpiresAt = ent.orgPlanExpiresAt;
+      if (principal.plan === 'free') principal.plan = 'enterprise';
+      await principal.save({ validateBeforeSave: false });
+    }
+
     res.json({ enterprise: ent });
   } catch (err) { next(err); }
 };
