@@ -26,5 +26,5 @@ export const examValidation = [
   body('title').trim().notEmpty().withMessage('Exam title is required'),
   body('subject').trim().notEmpty().withMessage('Subject is required'),
   body('difficulty').isIn(['easy', 'medium', 'hard']).withMessage('Invalid difficulty'),
-  body('numQuestions').isInt({ min: 5, max: 30 }).withMessage('Questions must be between 5 and 30'),
+  body('numQuestions').isInt({ min: 5, max: 100 }).withMessage('Questions must be between 5 and 100'),
 ];

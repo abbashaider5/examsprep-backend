@@ -16,6 +16,9 @@ import logger from '../utils/logger.js';
 
 const isInstructor = (user) => user.role === 'instructor' || user.role === 'admin';
 const isPro       = (user) => ['pro', 'enterprise'].includes(user.plan) || user.role === 'admin';
+/** Instructors linked to an org use org capacity; personal plan may stay free. */
+const canCreateInstructorGroup = (user) =>
+  isPro(user) || (user.role === 'instructor' && !!user.enterpriseId);
 const CLIENT_URL  = process.env.CLIENT_URL || 'http://localhost:5173';
 const WARNING_LIMIT = 3;
 const MODERATION_REPLACEMENT_TEXT = '⚠ Message removed due to inappropriate language.';
@@ -43,7 +46,9 @@ const assertGroupAccess = async (groupId, user) => {
 export async function createGroup(req, res) {
   try {
     if (!isInstructor(req.user)) return res.status(403).json({ message: 'Instructors only' });
-    if (!isPro(req.user)) return res.status(403).json({ message: 'Pro plan required to create groups', code: 'PLAN_REQUIRED' });
+    if (!canCreateInstructorGroup(req.user)) {
+      return res.status(403).json({ message: 'Pro plan required to create groups', code: 'PLAN_REQUIRED' });
+    }
 
     const { name, description, settings } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: 'Group name is required' });

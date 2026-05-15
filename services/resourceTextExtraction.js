@@ -4,6 +4,21 @@ import { extractPdfHybrid } from './pdfHybridExtractionService.js';
 
 const EXT = (name = '') => name.split('.').pop()?.toLowerCase() || '';
 
+/**
+ * Shared DOCX → text path for uploads and PDF→DOCX recovery (single mammoth pipeline).
+ * @param {Buffer} buffer
+ * @returns {Promise<{ text: string, pages: number, format: 'docx', usedOcr: false }>}
+ */
+export async function extractTextFromDocxBuffer(buffer) {
+  const mammoth = await import('mammoth');
+  const res = await mammoth.extractRawText({ buffer });
+  const text = (res.value || '').trim();
+  if (res.messages?.length) {
+    logger.debug(`[resourceTextExtraction] mammoth messages: ${res.messages.map(m => m.message).join('; ')}`);
+  }
+  return { text, pages: 0, format: 'docx', usedOcr: false };
+}
+
 /** Pull visible text nodes from OOXML (pptx / shared patterns) */
 const extractTextFromOoxml = (xml) => {
   if (!xml || typeof xml !== 'string') return '';
@@ -40,13 +55,7 @@ export const extractTextFromResourceBuffer = async (buffer, originalName = '', m
   }
 
   if (ext === 'docx' || mt.includes('wordprocessingml')) {
-    const mammoth = await import('mammoth');
-    const res = await mammoth.extractRawText({ buffer });
-    const text = (res.value || '').trim();
-    if (res.messages?.length) {
-      logger.debug(`[resourceTextExtraction] mammoth messages: ${res.messages.map(m => m.message).join('; ')}`);
-    }
-    return { text, pages: 0, format: 'docx', usedOcr: false };
+    return extractTextFromDocxBuffer(buffer);
   }
 
   if (ext === 'pptx' || mt.includes('presentationml')) {

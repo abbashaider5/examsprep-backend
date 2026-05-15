@@ -222,7 +222,7 @@ async function rasterWithPdfToImg(buffer, maxPages, onStage) {
 export async function extractPdfHybrid(buffer, opts = {}) {
   const { onStage } = opts;
 
-  onStage?.('Reading your PDF…');
+  onStage?.('Reading PDF content…');
 
   const normalized = normalizePdfBuffer(buffer);
 
@@ -274,7 +274,7 @@ export async function extractPdfHybrid(buffer, opts = {}) {
     throw err;
   }
 
-  onStage?.('We detected a scanned PDF — extracting text with OCR…');
+  onStage?.('AI detected a scanned PDF — reading with OCR…');
 
   const pageCount = Math.max(1, pages || 1);
   const maxPages = Math.min(pageCount, MAX_OCR_PAGES);
@@ -291,7 +291,7 @@ export async function extractPdfHybrid(buffer, opts = {}) {
     throw err;
   }
 
-  onStage?.('Extracting text using OCR…');
+  onStage?.('Extracting text with OCR…');
 
   const worker = await createWorker('eng');
   const parts = [];
@@ -306,7 +306,7 @@ export async function extractPdfHybrid(buffer, opts = {}) {
         err.code = 'OCR_TIMEOUT';
         throw err;
       }
-      onStage?.(`Extracting text using OCR… page ${i + 1} of ${pageBuffers.length}`);
+      onStage?.(`Extracting text with OCR… page ${i + 1} of ${pageBuffers.length}`);
       const pageBuf = pageBuffers[i];
       const { data: ocrData } = await Promise.race([
         worker.recognize(pageBuf),
@@ -334,7 +334,7 @@ export async function extractPdfHybrid(buffer, opts = {}) {
     throw err;
   }
 
-  onStage?.('Preparing educational content for indexing…');
+  onStage?.('Processing educational document…');
 
   return { text: merged, pages: pageBuffers.length, usedOcr: true };
 }

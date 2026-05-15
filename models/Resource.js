@@ -23,7 +23,7 @@ const resourceSchema = new mongoose.Schema({
   processingErrorMessage:{ type: String, default: '' },
   /** Short UX label while processing (e.g. OCR step); cleared when ready/failed */
   processingStageLabel:  { type: String, default: '' },
-  /** Where processing stopped: extract | ocr | rasterize | prepare | index | download | upload | other */
+  /** Where processing stopped: extract | ocr | rasterize | prepare | convert | index | download | upload | other */
   processingFailedStage: { type: String, default: '' },
   chunkCount:        { type: Number, default: 0 },
   extractedCharCount:{ type: Number, default: 0 },
@@ -35,6 +35,15 @@ const resourceSchema = new mongoose.Schema({
   }],
   embeddingModel:    { type: String, default: '' },
   processedAt:       { type: Date, default: null },
+
+  /** PDF→DOCX recovery (Cloudinary raw); avoids repeat conversion & aids debugging */
+  convertedDocxUrl:      { type: String, default: '' },
+  convertedDocxPublicId:{ type: String, default: '' },
+  conversionProvider:  { type: String, default: '' },
+  /** none | pending | ready | failed */
+  conversionStatus:    { type: String, enum: ['none', 'pending', 'ready', 'failed'], default: 'none' },
+  conversionTimestamp: { type: Date, default: null },
+  conversionErrorMessage:{ type: String, default: '' },
 }, { timestamps: true });
 
 resourceSchema.index({ scope: 1 });
