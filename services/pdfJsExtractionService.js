@@ -30,24 +30,34 @@ function pdfJsDirUrl(absoluteDir) {
 /**
  * Load pdfjs-dist legacy CJS once (stable on Node 20 / Vercel).
  */
+/** Node/server extraction: always disable worker (reliable on Vercel + local). */
+const disablePdfWorker = process.env.PDFJS_USE_WORKER !== '1';
+
 function getPdfJsRuntime() {
   if (runtime) return runtime;
 
   const pkgDir = path.dirname(require.resolve('pdfjs-dist/package.json'));
   const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
-  const workerPath = path.join(pkgDir, 'legacy/build/pdf.worker.js');
-  pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(workerPath).href;
+
+  let workerSrc = '';
+  if (!disablePdfWorker) {
+    const workerPath = path.join(pkgDir, 'legacy/build/pdf.worker.js');
+    workerSrc = pathToFileURL(workerPath).href;
+    pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
+  }
 
   runtime = {
     pdfjs,
     pkgDir,
+    disableWorker: disablePdfWorker,
     cMapUrl: pdfJsDirUrl(path.join(pkgDir, 'cmaps')),
     standardFontDataUrl: pdfJsDirUrl(path.join(pkgDir, 'standard_fonts')),
   };
 
   logPdfExtract('runtime_init', {
     pdfjsVersion: require('pdfjs-dist/package.json').version,
-    workerSrc: pdfjs.GlobalWorkerOptions.workerSrc,
+    disableWorker: runtime.disableWorker,
+    workerSrc: workerSrc || '(disabled)',
     cMapUrl: runtime.cMapUrl,
   });
 
@@ -188,7 +198,7 @@ export function isWeakPdfTextExtract(text, pageCount) {
  * @param {{ onPage?: (pageNum: number, total: number) => void, variant?: string }} [opts]
  */
 async function extractTextViaPdfJs(buffer, opts = {}) {
-  const { pdfjs, cMapUrl, standardFontDataUrl } = getPdfJsRuntime();
+  const { pdfjs, cMapUrl, standardFontDataUrl, disableWorker } = getPdfJsRuntime();
   const data = new Uint8Array(buffer);
 
   const base = {
@@ -197,6 +207,7 @@ async function extractTextViaPdfJs(buffer, opts = {}) {
     isEvalSupported: false,
     disableFontFace: true,
     useSystemFonts: true,
+    disableWorker: Boolean(disableWorker),
   };
 
   /** @type {Record<string, unknown>[]} */

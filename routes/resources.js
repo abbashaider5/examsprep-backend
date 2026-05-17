@@ -1,5 +1,6 @@
 import express from 'express';
 import multer from 'multer';
+import { RESOURCE_UPLOAD_MAX_BYTES } from '../config/uploadLimits.js';
 import {
   deleteResource,
   getAdminResources, getGroupResources,
@@ -13,7 +14,7 @@ import { protect } from '../middleware/auth.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB (PDF OCR safety limits apply during processing)
+  limits: { fileSize: RESOURCE_UPLOAD_MAX_BYTES },
   fileFilter: (_, file, cb) => {
     const allowed = [
       'application/pdf',

@@ -109,6 +109,7 @@ app.use(async (req, res, next) => {
 
   return res.status(503).json({
     message: 'Database is temporarily unavailable. Please try again in a few seconds.',
+    code: 'DB_UNAVAILABLE',
     details:
       process.env.NODE_ENV === 'development' || process.env.VERCEL_ENV === 'preview'
         ? {
@@ -153,6 +154,7 @@ app.use('/api/announcements', announcementRoutes);
 app.use('/api/groups',        groupRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/resources',    resourceRoutes);
+app.use('/resources',        resourceRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/help', helpRoutes);
 app.use('/api/enterprise', enterpriseRoutes);

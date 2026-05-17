@@ -12,6 +12,7 @@ import { extractTextFromResourceBuffer } from './resourceTextExtraction.js';
 import { logPdfExtract, pdfBufferFingerprint } from '../utils/pdfExtractionDiagnostics.js';
 import { delCache } from './cacheService.js';
 import { downloadStoredResourceBuffer, uploadResourceFile } from './cloudinaryService.js';
+import { scheduleBackgroundWork } from '../utils/backgroundTask.js';
 
 const isPdfResource = (resource) => {
   const n = (resource.originalName || '').toLowerCase();
@@ -289,16 +290,18 @@ export const processResourceDocument = async (resourceId, opts = {}) => {
  */
 export const enqueueResourceProcessing = (resourceId, opts = {}) => {
   const fileBuffer = opts.fileBuffer?.length ? Buffer.from(opts.fileBuffer) : null;
-  setImmediate(() => {
-    processResourceDocument(resourceId, { fileBuffer }).catch((err) => {
+  scheduleBackgroundWork(async () => {
+    try {
+      await processResourceDocument(resourceId, { fileBuffer });
+    } catch (err) {
       logger.error(`[resourceProcessing] Unhandled error for ${resourceId}: ${err.message}`);
-      Resource.findByIdAndUpdate(resourceId, {
+      await Resource.findByIdAndUpdate(resourceId, {
         processingStatus: 'failed',
         processingErrorCode: 'UNEXPECTED',
         processingErrorMessage: 'Something interrupted processing. Try again or upload a different file.',
         processingStageLabel: '',
         processingFailedStage: 'other',
       }).catch(() => {});
-    });
+    }
   });
 };

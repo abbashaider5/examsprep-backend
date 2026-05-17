@@ -101,9 +101,49 @@ export const connectDB = async () => {
   }
 };
 
+/** Clear a stale in-flight connect so the next attempt can open a fresh socket. */
+export function resetDbConnectionCache() {
+  const cache = getConnectionCache();
+  cache.promise = null;
+}
+
 /** Await a live Mongo connection before handling DB-backed routes (serverless-safe). */
 export async function ensureDbConnected() {
   if (mongoose.connection.readyState === 1) return true;
-  const conn = await connectDB();
-  return Boolean(conn) && mongoose.connection.readyState === 1;
+
+  const cache = getConnectionCache();
+  const maxAttempts = Number(process.env.MONGO_ENSURE_MAX_ATTEMPTS || (process.env.VERCEL ? 5 : 3));
+  const baseDelayMs = Number(process.env.MONGO_ENSURE_RETRY_MS || 400);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (mongoose.connection.readyState === 1) return true;
+
+    if (mongoose.connection.readyState === 2 && cache.promise) {
+      try {
+        await cache.promise;
+      } catch {
+        resetDbConnectionCache();
+      }
+      if (mongoose.connection.readyState === 1) return true;
+    }
+
+    if (mongoose.connection.readyState === 0 || mongoose.connection.readyState === 3) {
+      resetDbConnectionCache();
+    }
+
+    try {
+      const conn = await connectDB();
+      if (conn && mongoose.connection.readyState === 1) return true;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`ensureDbConnected attempt ${attempt}/${maxAttempts}:`, err?.message || err);
+      resetDbConnectionCache();
+    }
+
+    if (attempt < maxAttempts) {
+      await sleep(Math.min(8000, baseDelayMs * attempt));
+    }
+  }
+
+  return mongoose.connection.readyState === 1;
 }

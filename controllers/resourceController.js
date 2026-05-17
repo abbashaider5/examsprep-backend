@@ -41,6 +41,9 @@ export const uploadResource = async (req, res, next) => {
 
     // Process from multer buffer first; Cloudinary is storage-only after indexing succeeds.
     const fileBuffer = Buffer.from(req.file.buffer);
+    if (!fileBuffer.length) {
+      return next(new AppError('Uploaded file is empty. Please choose the file again.', 400));
+    }
 
     const resource = await Resource.create({
       title: title.trim(),

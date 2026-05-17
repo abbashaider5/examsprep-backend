@@ -19,10 +19,11 @@ import {
   updateHelpTopic,
 } from '../controllers/helpTopicController.js';
 import { protect, requireAdmin } from '../middleware/auth.js';
+import { RESOURCE_UPLOAD_MAX_BYTES } from '../config/uploadLimits.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 },
+  limits: { fileSize: RESOURCE_UPLOAD_MAX_BYTES },
   fileFilter: (_, file, cb) => {
     const allowed = [
       'application/pdf',

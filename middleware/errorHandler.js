@@ -14,6 +14,17 @@ export const errorHandler = (err, req, res, next) => {
   if (err.name === 'CastError') {
     return res.status(400).json({ message: 'Invalid ID format' });
   }
+  if (err.name === 'MulterError') {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        message: process.env.VERCEL
+          ? 'File is too large for production upload (max 4.5 MB). Use a smaller file or Word (.docx).'
+          : 'File is too large (max 20 MB).',
+        code: 'FILE_TOO_LARGE',
+      });
+    }
+    return res.status(400).json({ message: err.message || 'Upload error', code: err.code });
+  }
 
   const status = err.statusCode || 500;
 
