@@ -11,5 +11,12 @@
       "src": "/(.*)",
       "dest": "server.js"
     }
-  ]
+  ],
+  "functions": {
+    "server.js": {
+      "maxDuration": 60,
+      "memory": 3008,
+      "includeFiles": "node_modules/pdfjs-dist/**"
+    }
+  }
 }

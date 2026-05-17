@@ -196,7 +196,13 @@ export const getResourceText = async (req, res, next) => {
       if (e.code === 'PDF_SCANNED') {
         return next(new AppError(e.message || 'This PDF appears to be scanned or image-based. Upload Word (.docx) or a text-based PDF.', 422));
       }
-      if (e.code === 'PDF_NOT_SUPPORTED' || e.code === 'EXTRACTION_FAILED') {
+      if (
+        e.code === 'PDF_NOT_SUPPORTED'
+        || e.code === 'EXTRACTION_FAILED'
+        || e.code === 'PDF_MALFORMED'
+        || e.code === 'PDF_ENCRYPTED'
+        || e.code === 'PDF_RUNTIME'
+      ) {
         return next(new AppError(e.message || 'This PDF could not be processed.', 422));
       }
       logger.warn(`[Resource] Text extract failed for ${resource._id}: ${e.message}`);

@@ -845,6 +845,7 @@ export const parsePDF = async (req, res, next) => {
       req.file.buffer,
       req.file.originalname || 'upload.pdf',
       req.file.mimetype || 'application/pdf',
+      { pdfLabel: `parse-pdf:${req.user?._id || 'anon'}` },
     );
     const text = normalizeExtractedForExam(ex);
     if (!text || text.length < 50) {

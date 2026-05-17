@@ -1,50 +1,71 @@
 /**
- * Direct pdf.js (pdfjs-dist) text extraction for educational PDFs.
- * Page-by-page getPage → getTextContent, merged in reading order.
+ * Server-side PDF text extraction via pdfjs-dist@3.11 (legacy Node build).
+ * Optimized for Vercel serverless: CJS legacy build, file:// worker + cmaps, no browser workers.
  */
 import { createRequire } from 'module';
 import path from 'path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'url';
 import logger from '../utils/logger.js';
+import {
+  classifyPdfExtractError,
+  logPdfExtract,
+  pdfBufferFingerprint,
+} from '../utils/pdfExtractionDiagnostics.js';
 
 const require = createRequire(import.meta.url);
 
-let _pdfjsPath = null;
-function getPdfjsPath() {
-  if (_pdfjsPath) return _pdfjsPath;
-  try {
-    _pdfjsPath = path.dirname(require.resolve('pdfjs-dist/package.json'));
-    return _pdfjsPath;
-  } catch (e) {
-    throw new Error(
-      'pdfjs-dist is not installed. Add it to server dependencies (npm install pdfjs-dist).',
-      { cause: e },
-    );
-  }
-}
-
 const PDF_SIG = [0x25, 0x50, 0x44, 0x46]; // %PDF
 
-/** pdf.js requires factory URLs to end with `/` (forward slash); plain Windows paths fail. */
+/** @type {{ pdfjs: typeof import('pdfjs-dist/legacy/build/pdf.js'); pkgDir: string } | null} */
+let runtime = null;
+
 function pdfJsDirUrl(absoluteDir) {
   const resolved = path.resolve(absoluteDir);
-  const withSep = resolved.endsWith(path.sep) ? resolved : resolved + path.sep;
+  const withSep = resolved.endsWith(path.sep) ? resolved : `${resolved}${path.sep}`;
   let href = pathToFileURL(withSep).href;
   if (!href.endsWith('/')) href = `${href}/`;
   return href;
 }
 
 /**
- * Strip BOM / find %PDF offset so parsers see a real file (CDN quirks, prepended bytes).
+ * Load pdfjs-dist legacy CJS once (stable on Node 20 / Vercel).
+ */
+function getPdfJsRuntime() {
+  if (runtime) return runtime;
+
+  const pkgDir = path.dirname(require.resolve('pdfjs-dist/package.json'));
+  const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
+  const workerPath = path.join(pkgDir, 'legacy/build/pdf.worker.js');
+  pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(workerPath).href;
+
+  runtime = {
+    pdfjs,
+    pkgDir,
+    cMapUrl: pdfJsDirUrl(path.join(pkgDir, 'cmaps')),
+    standardFontDataUrl: pdfJsDirUrl(path.join(pkgDir, 'standard_fonts')),
+  };
+
+  logPdfExtract('runtime_init', {
+    pdfjsVersion: require('pdfjs-dist/package.json').version,
+    workerSrc: pdfjs.GlobalWorkerOptions.workerSrc,
+    cMapUrl: runtime.cMapUrl,
+  });
+
+  return runtime;
+}
+
+/**
  * @param {Buffer} buffer
  * @returns {Buffer}
  */
 export function normalizePdfBuffer(buffer) {
   if (!buffer || buffer.length < 5) return buffer;
-  let u8 = Buffer.isBuffer(buffer) ? Uint8Array.from(buffer) : new Uint8Array(buffer);
+
+  let u8 = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
   let start = 0;
   if (u8.length >= 3 && u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) start = 3;
   if (start) u8 = u8.subarray(start);
+
   if (
     u8.length >= 4
     && u8[0] === PDF_SIG[0]
@@ -54,6 +75,7 @@ export function normalizePdfBuffer(buffer) {
   ) {
     return Buffer.from(u8);
   }
+
   const lim = Math.min(u8.length - 4, 32768);
   for (let i = 0; i <= lim; i++) {
     if (
@@ -69,8 +91,40 @@ export function normalizePdfBuffer(buffer) {
 }
 
 /**
- * Build page text from pdf.js text items (respects hasEOL like browser extraction).
- * @param {import('pdfjs-dist').TextContent} textContent
+ * @param {Buffer} buffer
+ * @param {{ label?: string }} [meta]
+ */
+export function validatePdfBuffer(buffer, meta = {}) {
+  const fpIn = pdfBufferFingerprint(buffer);
+  if (!fpIn.bytes) {
+    const err = new Error('PDF buffer is empty');
+    err.code = 'PDF_MALFORMED';
+    throw err;
+  }
+
+  const normalized = normalizePdfBuffer(buffer);
+  const fp = pdfBufferFingerprint(normalized);
+
+  logPdfExtract('buffer_validated', {
+    label: meta.label || '',
+    inputBytes: fpIn.bytes,
+    normalizedBytes: fp.bytes,
+    header: fp.header,
+    hasPdfSig: fp.hasPdfSig,
+    trimmedLeadingBytes: fpIn.bytes - fp.bytes,
+  });
+
+  if (!fp.hasPdfSig || fp.bytes < 100) {
+    const err = new Error('Invalid or truncated PDF (missing %PDF header)');
+    err.code = 'PDF_MALFORMED';
+    throw err;
+  }
+
+  return normalized;
+}
+
+/**
+ * @param {import('pdfjs-dist/types/src/display/api').TextContent} textContent
  */
 export function pageTextFromTextContent(textContent) {
   const items = textContent?.items || [];
@@ -92,7 +146,7 @@ export function pageTextFromTextContent(textContent) {
 }
 
 /**
- * @param {import('pdfjs-dist').PDFDocumentProxy} pdfDocument
+ * @param {import('pdfjs-dist/types/src/display/api').PDFDocumentProxy} pdfDocument
  * @param {{ onPage?: (pageNum: number, total: number) => void }} [opts]
  */
 async function readTextFromPdfDocument(pdfDocument, opts = {}) {
@@ -111,9 +165,6 @@ async function readTextFromPdfDocument(pdfDocument, opts = {}) {
   return { text: pageTexts.join('\n\n').trim(), pages: numPages };
 }
 
-/**
- * Heuristic: likely scanned / image PDF or broken extract when text is sparse vs page count.
- */
 export function isWeakPdfTextExtract(text, pageCount) {
   const t = (text || '').replace(/\s+/g, ' ').trim();
   const pages = Math.max(1, pageCount || 1);
@@ -133,66 +184,62 @@ export function isWeakPdfTextExtract(text, pageCount) {
 }
 
 /**
- * Open PDF with pdfjs-dist (tries legacy + modern builds and font/cmap variants).
- * @param {Buffer} buffer normalized PDF bytes
- * @param {{ onPage?: (pageNum: number, total: number) => void }} [opts]
+ * @param {Buffer} buffer normalized PDF
+ * @param {{ onPage?: (pageNum: number, total: number) => void, variant?: string }} [opts]
  */
 async function extractTextViaPdfJs(buffer, opts = {}) {
-  const data = Uint8Array.from(buffer);
-  if (data.length < 20) throw new Error('PDF data too small');
+  const { pdfjs, cMapUrl, standardFontDataUrl } = getPdfJsRuntime();
+  const data = new Uint8Array(buffer);
 
-  const pdfjsPath = getPdfjsPath();
-  const cMapUrl = pdfJsDirUrl(path.join(pdfjsPath, 'cmaps'));
+  const base = {
+    data,
+    verbosity: 0,
+    isEvalSupported: false,
+    disableFontFace: true,
+    useSystemFonts: true,
+  };
+
   /** @type {Record<string, unknown>[]} */
   const docInitVariants = [
-    { isEvalSupported: false, disableFontFace: true, useSystemFonts: true },
-    { isEvalSupported: false, disableFontFace: true, useSystemFonts: true, cMapUrl, cMapPacked: true },
+    { ...base, label: 'minimal' },
+    { ...base, cMapUrl, cMapPacked: true, label: 'cmaps' },
     {
-      isEvalSupported: false,
-      disableFontFace: true,
-      useSystemFonts: true,
-      standardFontDataUrl: pdfJsDirUrl(path.join(pdfjsPath, 'standard_fonts')),
+      ...base,
       cMapUrl,
       cMapPacked: true,
+      standardFontDataUrl,
+      label: 'cmaps+fonts',
     },
   ];
 
-  const loaders = [
-    () => import('pdfjs-dist/legacy/build/pdf.mjs'),
-    () => import('pdfjs-dist/build/pdf.mjs'),
-  ];
-
   let lastErr = new Error('pdf.js could not open this document');
-  for (const load of loaders) {
-    let pdfjs;
+
+  for (const variant of docInitVariants) {
+    const { label, ...docInit } = variant;
+    let pdfDocument;
     try {
-      pdfjs = await load();
+      logPdfExtract('getDocument_start', { variant: label || opts.variant || 'default', bytes: buffer.length });
+      const task = pdfjs.getDocument(docInit);
+      pdfDocument = await task.promise;
+      logPdfExtract('getDocument_ok', { variant: label, numPages: pdfDocument.numPages });
     } catch (e) {
       lastErr = e;
+      logger.warn(`[pdfExtract] getDocument failed (${label}): ${e?.message || e}`);
       continue;
     }
-    if (typeof pdfjs.getDocument !== 'function') continue;
 
-    for (const extra of docInitVariants) {
-      let pdfDocument;
-      try {
-        const task = pdfjs.getDocument({ data, ...extra });
-        pdfDocument = await task.promise;
-      } catch (e) {
-        lastErr = e;
-        logger.debug(`[pdfJs] getDocument failed (${e.message})`);
-        continue;
-      }
-      try {
-        return await readTextFromPdfDocument(pdfDocument, opts);
-      } catch (e) {
-        lastErr = e;
-        logger.debug(`[pdfJs] getTextContent failed (${e.message})`);
-      } finally {
-        await pdfDocument.cleanup?.().catch(() => {});
-      }
+    try {
+      const result = await readTextFromPdfDocument(pdfDocument, opts);
+      logPdfExtract('read_pages_ok', { variant: label, pages: result.pages, textLen: result.text.length });
+      return result;
+    } catch (e) {
+      lastErr = e;
+      logger.warn(`[pdfExtract] getTextContent failed (${label}): ${e?.message || e}`);
+    } finally {
+      await pdfDocument.cleanup?.().catch(() => {});
     }
   }
+
   throw lastErr;
 }
 
@@ -200,33 +247,50 @@ const SCANNED_USER_MESSAGE =
   'This PDF appears to be scanned or image-based. For best results, upload a Word (.docx) file or a text-based PDF exported from your original document.';
 
 /**
- * Extract text using pdfjs-dist only (no pdf-parse, no OCR).
  * @param {Buffer} buffer
- * @param {{ onStage?: (msg: string) => void }} [opts]
- * @returns {Promise<{ text: string, pages: number, usedOcr: false }>}
+ * @param {{ onStage?: (msg: string) => void, label?: string }} [opts]
  */
 export async function extractPdfWithPdfJs(buffer, opts = {}) {
-  const { onStage } = opts;
-  onStage?.('Reading PDF content…');
+  const { onStage, label } = opts;
 
-  const normalized = normalizePdfBuffer(buffer);
+  logPdfExtract('extract_start', { label: label || '' });
+  onStage?.('Extracting PDF text…');
+
+  let normalized;
+  try {
+    normalized = validatePdfBuffer(buffer, { label });
+  } catch (e) {
+    const classified = classifyPdfExtractError(e);
+    const err = new Error(classified.userMessage);
+    err.code = classified.code;
+    err.internalReason = classified.internalReason;
+    throw err;
+  }
+
   let result;
-
   try {
     result = await extractTextViaPdfJs(normalized, {
       onPage: (p, total) => {
-        if (total > 1) onStage?.(`Reading PDF content… page ${p} of ${total}`);
+        if (total > 1) onStage?.(`Extracting PDF text… page ${p} of ${total}`);
       },
     });
   } catch (e) {
-    logger.warn(`[pdfJs] extraction failed: ${e.message}`);
-    const err = new Error('This PDF could not be opened. It may be corrupted, password-protected, or an unusual export.');
-    err.code = 'EXTRACTION_FAILED';
+    const classified = classifyPdfExtractError(e);
+    logPdfExtract('extract_failed', {
+      label: label || '',
+      internalReason: classified.internalReason,
+      error: e?.message || String(e),
+    });
+    const err = new Error(classified.userMessage);
+    err.code = classified.code;
+    err.internalReason = classified.internalReason;
     throw err;
   }
 
   const text = (result.text || '').trim();
   const pages = result.pages || 0;
+
+  logPdfExtract('extract_done', { label: label || '', pages, textLen: text.length });
 
   if (isWeakPdfTextExtract(text, pages)) {
     const err = new Error(SCANNED_USER_MESSAGE);
@@ -235,7 +299,6 @@ export async function extractPdfWithPdfJs(buffer, opts = {}) {
   }
 
   onStage?.('Processing educational document…');
-
   return { text, pages: pages || 1, usedOcr: false };
 }
 

@@ -50,7 +50,10 @@ export const extractTextFromResourceBuffer = async (buffer, originalName = '', m
   }
 
   if (ext === 'pdf' || mt === 'application/pdf') {
-    const { text, pages } = await extractPdfWithPdfJs(buffer, { onStage: onPdfStage });
+    const { text, pages } = await extractPdfWithPdfJs(buffer, {
+      onStage: onPdfStage,
+      label: options.pdfLabel || originalName || 'upload',
+    });
     return { text, pages, format: 'pdf', usedOcr: false };
   }
 

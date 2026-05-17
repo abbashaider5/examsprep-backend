@@ -9,6 +9,7 @@ import {
 } from './resourceChunkingService.js';
 import { embedTexts, getEmbeddingModelLabel, isEmbeddingServiceEnabled } from './embeddingService.js';
 import { extractTextFromResourceBuffer } from './resourceTextExtraction.js';
+import { logPdfExtract, pdfBufferFingerprint } from '../utils/pdfExtractionDiagnostics.js';
 import { delCache } from './cacheService.js';
 import { downloadStoredResourceBuffer, uploadResourceFile } from './cloudinaryService.js';
 
@@ -139,6 +140,8 @@ const handleExtractError = async (resourceId, e) => {
     );
   } else if (e.code === 'PDF_NOT_SUPPORTED') {
     await fail(resourceId, 'PDF_NOT_SUPPORTED', 'This PDF could not be opened. Try exporting it again from the original app.', 'extract');
+  } else if (e.code === 'PDF_MALFORMED' || e.code === 'PDF_ENCRYPTED' || e.code === 'PDF_RUNTIME') {
+    await fail(resourceId, e.code, msg || 'This PDF could not be processed. Try exporting again or upload Word (.docx).', 'extract');
   } else if (e.code === 'UNSUPPORTED_FORMAT') {
     await fail(resourceId, 'UNSUPPORTED_FILE', 'This file type is not supported. Use DOCX, PPTX, PDF, or TXT.', 'extract');
   } else if (e.code === 'EXTRACTION_FAILED') {
@@ -217,6 +220,19 @@ export const processResourceDocument = async (resourceId, opts = {}) => {
   let buffer;
   try {
     buffer = await resolveFileBuffer(resource, uploadBuffer);
+    if (isPdfResource(resource)) {
+      const fp = pdfBufferFingerprint(buffer);
+      logPdfExtract('resource_upload_buffer', {
+        resourceId: String(resourceId),
+        source: uploadBuffer?.length ? 'multer' : 'cloudinary',
+        ...fp,
+        originalName: resource.originalName || '',
+      });
+      if (!fp.bytes) {
+        await fail(resourceId, 'PDF_MALFORMED', 'The PDF did not upload correctly (empty file). Please try again.', 'upload');
+        return;
+      }
+    }
   } catch (e) {
     if (e.code === 'NO_FILE') {
       await fail(resourceId, 'NO_FILE', 'The file did not attach correctly. Please upload again.', 'upload');
@@ -237,6 +253,7 @@ export const processResourceDocument = async (resourceId, opts = {}) => {
   try {
     extracted = await extractTextFromResourceBuffer(buffer, resource.originalName, resource.mimetype, {
       onPdfStage: (label) => setProcessingStage(resourceId, label),
+      pdfLabel: `resource:${resourceId}`,
     });
   } catch (e) {
     await handleExtractError(resourceId, e);
