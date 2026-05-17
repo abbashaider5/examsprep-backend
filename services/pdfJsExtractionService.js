@@ -11,8 +11,13 @@ import {
   logPdfExtract,
   pdfBufferFingerprint,
 } from '../utils/pdfExtractionDiagnostics.js';
+import { extractPdfWithPdfParse } from './pdfParseFallbackService.js';
 
 const require = createRequire(import.meta.url);
+
+const PDFJS_VERSION = require('pdfjs-dist/package.json').version;
+/** HTTPS cmap/font URLs — file:// paths break on Vercel bundled lambdas. */
+const PDFJS_CDN_BASE = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}`;
 
 const PDF_SIG = [0x25, 0x50, 0x44, 0x46]; // %PDF
 
@@ -46,17 +51,25 @@ function getPdfJsRuntime() {
     pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
   }
 
+  const useCdnAssets = Boolean(process.env.VERCEL) || process.env.PDFJS_USE_CDN === '1';
+
   runtime = {
     pdfjs,
     pkgDir,
     disableWorker: disablePdfWorker,
-    cMapUrl: pdfJsDirUrl(path.join(pkgDir, 'cmaps')),
-    standardFontDataUrl: pdfJsDirUrl(path.join(pkgDir, 'standard_fonts')),
+    useCdnAssets,
+    cMapUrl: useCdnAssets
+      ? `${PDFJS_CDN_BASE}/cmaps/`
+      : pdfJsDirUrl(path.join(pkgDir, 'cmaps')),
+    standardFontDataUrl: useCdnAssets
+      ? `${PDFJS_CDN_BASE}/standard_fonts/`
+      : pdfJsDirUrl(path.join(pkgDir, 'standard_fonts')),
   };
 
   logPdfExtract('runtime_init', {
-    pdfjsVersion: require('pdfjs-dist/package.json').version,
+    pdfjsVersion: PDFJS_VERSION,
     disableWorker: runtime.disableWorker,
+    useCdnAssets: runtime.useCdnAssets,
     workerSrc: workerSrc || '(disabled)',
     cMapUrl: runtime.cMapUrl,
   });
@@ -206,19 +219,22 @@ async function extractTextViaPdfJs(buffer, opts = {}) {
     verbosity: 0,
     isEvalSupported: false,
     disableFontFace: true,
-    useSystemFonts: true,
+    useSystemFonts: false,
     disableWorker: Boolean(disableWorker),
+    disableAutoFetch: true,
+    useWorkerFetch: false,
   };
 
   /** @type {Record<string, unknown>[]} */
   const docInitVariants = [
     { ...base, label: 'minimal' },
-    { ...base, cMapUrl, cMapPacked: true, label: 'cmaps' },
+    { ...base, cMapUrl, cMapPacked: true, disableAutoFetch: false, label: 'cmaps' },
     {
       ...base,
       cMapUrl,
       cMapPacked: true,
       standardFontDataUrl,
+      disableAutoFetch: false,
       label: 'cmaps+fonts',
     },
   ];
@@ -236,6 +252,11 @@ async function extractTextViaPdfJs(buffer, opts = {}) {
     } catch (e) {
       lastErr = e;
       logger.warn(`[pdfExtract] getDocument failed (${label}): ${e?.message || e}`);
+      logPdfExtract('getDocument_failed', {
+        variant: label,
+        error: e?.message || String(e),
+        name: e?.name || '',
+      });
       continue;
     }
 
@@ -279,6 +300,7 @@ export async function extractPdfWithPdfJs(buffer, opts = {}) {
   }
 
   let result;
+  let pdfJsError = null;
   try {
     result = await extractTextViaPdfJs(normalized, {
       onPage: (p, total) => {
@@ -286,16 +308,32 @@ export async function extractPdfWithPdfJs(buffer, opts = {}) {
       },
     });
   } catch (e) {
-    const classified = classifyPdfExtractError(e);
-    logPdfExtract('extract_failed', {
+    pdfJsError = e;
+    logPdfExtract('pdfjs_primary_failed', {
       label: label || '',
-      internalReason: classified.internalReason,
       error: e?.message || String(e),
     });
-    const err = new Error(classified.userMessage);
-    err.code = classified.code;
-    err.internalReason = classified.internalReason;
-    throw err;
+    onStage?.('Trying alternate PDF reader…');
+    try {
+      result = await extractPdfWithPdfParse(normalized, { label: label || '' });
+      logPdfExtract('pdf_parse_fallback_ok', {
+        label: label || '',
+        pages: result.pages,
+        textLen: result.text?.length || 0,
+      });
+    } catch (fallbackErr) {
+      const classified = classifyPdfExtractError(pdfJsError);
+      logPdfExtract('extract_failed', {
+        label: label || '',
+        internalReason: classified.internalReason,
+        pdfjsError: pdfJsError?.message || String(pdfJsError),
+        pdfParseError: fallbackErr?.message || String(fallbackErr),
+      });
+      const err = new Error(classified.userMessage);
+      err.code = classified.code;
+      err.internalReason = classified.internalReason;
+      throw err;
+    }
   }
 
   const text = (result.text || '').trim();

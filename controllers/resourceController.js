@@ -4,7 +4,7 @@ import Resource from '../models/Resource.js';
 import ResourceChunk from '../models/ResourceChunk.js';
 import { deleteCloudinaryResource, downloadStoredResourceBuffer } from '../services/cloudinaryService.js';
 import { cleanExtractedText, cleanOcrExtractedText, cleanPdfExtractedText } from '../services/resourceChunkingService.js';
-import { enqueueResourceProcessing } from '../services/resourceProcessingService.js';
+import { enqueueResourceProcessing, processResourceDocument } from '../services/resourceProcessingService.js';
 import { extractTextFromResourceBuffer } from '../services/resourceTextExtraction.js';
 import logger from '../utils/logger.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
@@ -45,6 +45,9 @@ export const uploadResource = async (req, res, next) => {
       return next(new AppError('Uploaded file is empty. Please choose the file again.', 400));
     }
 
+    const isPdf = (req.file.mimetype || '').toLowerCase().includes('pdf')
+      || lowerName.endsWith('.pdf');
+
     const resource = await Resource.create({
       title: title.trim(),
       originalName: req.file.originalname,
@@ -63,9 +66,19 @@ export const uploadResource = async (req, res, next) => {
       chunkCount: 0,
     });
 
-    res.status(201).json({ resource });
-
-    enqueueResourceProcessing(resource._id, { fileBuffer });
+    // Vercel: process PDF in-request so the multer buffer is never lost after the response.
+    if (process.env.VERCEL && isPdf) {
+      try {
+        await processResourceDocument(resource._id, { fileBuffer });
+      } catch (procErr) {
+        logger.error(`[Resource] Inline PDF processing error for ${resource._id}: ${procErr.message}`);
+      }
+      const updated = await Resource.findById(resource._id);
+      res.status(201).json({ resource: updated || resource });
+    } else {
+      res.status(201).json({ resource });
+      enqueueResourceProcessing(resource._id, { fileBuffer });
+    }
 
     // Invalidate caches after response is sent
     const cacheKeys = [`resources:mine:${req.user._id}`];
