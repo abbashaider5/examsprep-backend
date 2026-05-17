@@ -23,7 +23,7 @@ const __dirname = path.dirname(__filename);
 import { validateEnv } from './utils/validateEnv.js';
 validateEnv();
 
-import { connectDB } from './config/db.js';
+import { connectDB, ensureDbConnected } from './config/db.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { apiLimiter } from './middleware/rateLimiter.js';
 import { getSettings } from './models/SystemSettings.js';
@@ -95,23 +95,22 @@ if (process.env.NODE_ENV !== 'test') {
   app.use(morgan('dev', { stream: { write: (msg) => logger.http(msg.trim()) } }));
 }
 
-// If Mongo isn't connected, return a helpful error for DB-backed endpoints.
-// (Without this, requests may hang or appear as proxy/network errors.)
-app.use((req, res, next) => {
+// Ensure Mongo is connected before DB-backed routes (critical on Vercel serverless cold starts).
+app.use(async (req, res, next) => {
   if (req.method === 'OPTIONS') return next();
-
-  const mongoReady = mongoose.connection.readyState === 1; // 1 = connected
-  if (mongoReady) return next();
-
-  // Health endpoint should still work.
   if (req.path === '/api/health' || req.path === '/health') return next();
 
-  // Most endpoints depend on DB (including auth); be explicit and fast.
+  try {
+    const ok = await ensureDbConnected();
+    if (ok) return next();
+  } catch (e) {
+    mongoBootError = e;
+  }
+
   return res.status(503).json({
-    message:
-      'Something went wrong. Please try again later.',
+    message: 'Database is temporarily unavailable. Please try again in a few seconds.',
     details:
-      process.env.NODE_ENV === 'development'
+      process.env.NODE_ENV === 'development' || process.env.VERCEL_ENV === 'preview'
         ? {
             mongoReadyState: mongoose.connection.readyState,
             bootError: mongoBootError?.message || null,
