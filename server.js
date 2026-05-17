@@ -30,6 +30,7 @@ import { getSettings } from './models/SystemSettings.js';
 import logger from './utils/logger.js';
 import { seedHelpTopicsIfEmpty } from './utils/seedHelpTopics.js';
 import { scheduleProctoringScreenshotCleanup } from './services/proctoringScreenshotRetention.js';
+import { createCorsOptions } from './config/cors.js';
 
 import adminRoutes from './routes/admin.js';
 import announcementRoutes from './routes/announcements.js';
@@ -68,42 +69,13 @@ if (!mongoBootError) {
 mongoose.set('bufferCommands', false);
 mongoose.set('bufferTimeoutMS', 1000);
 
-// ── CORS — supports both production and local dev ────────────────────────────
-const allowedOrigins = [
-  process.env.CLIENT_URL,
-  'https://likhitai.com',
-  'https://www.likhitai.com',
-  'https://exams.abbaslogic.com',
-  'http://localhost:5173',
-  'http://localhost:3000',
-  'http://localhost:4173',
-].filter(Boolean);
+// ── CORS — production domains, Vercel previews, CLIENT_URL (+ www variant) ───
+const corsOptions = createCorsOptions();
 
-const normalizeOrigin = (value) => {
-  if (!value) return '';
-  return value.endsWith('/') ? value.slice(0, -1) : value;
-};
-
-const staticAllowedOrigins = new Set(allowedOrigins.map(normalizeOrigin));
-
-const corsOptions = {
-  origin: (origin, callback) => {
-    // Allow requests with no origin (server-to-server, mobile apps, curl)
-    if (!origin) return callback(null, true);
-    const normalizedOrigin = normalizeOrigin(origin);
-    const isLikhitAIDomain = /^https:\/\/([a-z0-9-]+\.)*likhitai\.com$/i.test(normalizedOrigin);
-    if (staticAllowedOrigins.has(normalizedOrigin) || isLikhitAIDomain) return callback(null, true);
-    callback(new Error(`CORS: origin "${origin}" not allowed`));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  optionsSuccessStatus: 200,
-};
-
+app.set('trust proxy', 1);
 app.use(helmet({ crossOriginEmbedderPolicy: false, contentSecurityPolicy: false }));
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // explicit preflight for all routes
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser(process.env.COOKIE_SECRET));
