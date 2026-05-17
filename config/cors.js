@@ -14,7 +14,6 @@ export const normalizeOrigin = (value) => {
   return value.endsWith('/') ? value.slice(0, -1) : value;
 };
 
-/** Add www / non-www variant for a canonical site URL. */
 function wwwVariants(origin) {
   const n = normalizeOrigin(origin);
   if (!n) return [];
@@ -28,7 +27,7 @@ function wwwVariants(origin) {
       out.add(normalizeOrigin(`${u.protocol}//www.${host}`));
     }
   } catch {
-    /* ignore invalid URLs */
+    /* ignore */
   }
   return [...out];
 }
@@ -41,14 +40,31 @@ function parseExtraOrigins() {
     .filter(Boolean);
 }
 
+/** Vercel injects deployment URLs at runtime — always allow these. */
+function vercelDeploymentOrigins() {
+  const out = [];
+  for (const key of ['VERCEL_URL', 'VERCEL_BRANCH_URL', 'VERCEL_PROJECT_PRODUCTION_URL']) {
+    const v = process.env[key];
+    if (!v) continue;
+    const withProto = v.startsWith('http') ? v : `https://${v}`;
+    for (const variant of wwwVariants(withProto)) out.push(variant);
+  }
+  return out;
+}
+
 export function buildAllowedOriginSet() {
   const set = new Set(PRODUCTION_ORIGINS.map(normalizeOrigin));
 
-  for (const url of [process.env.CLIENT_URL, process.env.FRONTEND_URL, process.env.VITE_SITE_URL]) {
+  for (const url of [
+    process.env.CLIENT_URL,
+    process.env.FRONTEND_URL,
+    process.env.VITE_SITE_URL,
+    process.env.EMAIL_PUBLIC_URL,
+  ]) {
     for (const v of wwwVariants(url)) set.add(v);
   }
 
-  for (const o of parseExtraOrigins()) {
+  for (const o of [...parseExtraOrigins(), ...vercelDeploymentOrigins()]) {
     set.add(o);
     for (const v of wwwVariants(o)) set.add(v);
   }
@@ -56,28 +72,42 @@ export function buildAllowedOriginSet() {
   return set;
 }
 
-const LIKHITAI_SUBDOMAIN = /^https:\/\/([a-z0-9-]+\.)*likhitai\.com$/i;
-const VERCEL_APP = /^https:\/\/[a-z0-9][a-z0-9-]*\.vercel\.app$/i;
+const LIKHITAI_HOST = /^([\w-]+\.)*likhitai\.com$/i;
+const ABBAS_HOST = /^([\w-]+\.)*abbaslogic\.com$/i;
+const VERCEL_HOST = /^[\w.-]+\.vercel\.app$/i;
+
+function hostMatchesTrustedPattern(hostname) {
+  if (!hostname) return false;
+  return LIKHITAI_HOST.test(hostname) || ABBAS_HOST.test(hostname) || VERCEL_HOST.test(hostname);
+}
 
 export function isOriginAllowed(origin, allowedSet) {
   const normalized = normalizeOrigin(origin);
   if (!normalized) return true;
   if (allowedSet.has(normalized)) return true;
-  if (LIKHITAI_SUBDOMAIN.test(normalized)) return true;
-  if (VERCEL_APP.test(normalized)) return true;
+
+  try {
+    const { hostname, protocol } = new URL(normalized);
+    if (protocol !== 'https:' && protocol !== 'http:') return false;
+    if (hostMatchesTrustedPattern(hostname)) return true;
+
+    const clientUrl = process.env.CLIENT_URL || process.env.FRONTEND_URL;
+    if (clientUrl) {
+      const clientHost = new URL(clientUrl.startsWith('http') ? clientUrl : `https://${clientUrl}`).hostname;
+      if (hostname === clientHost) return true;
+    }
+  } catch {
+    return false;
+  }
+
   return false;
 }
 
 export function createCorsOptions() {
-  const allowedSet = buildAllowedOriginSet();
-
-  if (process.env.NODE_ENV !== 'test') {
-    logger.info(`[CORS] ${allowedSet.size} static origin(s); likhitai.com + *.vercel.app patterns enabled`);
-  }
-
   return {
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
+      const allowedSet = buildAllowedOriginSet();
       if (isOriginAllowed(origin, allowedSet)) {
         return callback(null, origin);
       }
@@ -90,5 +120,28 @@ export function createCorsOptions() {
     exposedHeaders: ['Set-Cookie'],
     optionsSuccessStatus: 204,
     maxAge: 86400,
+    preflightContinue: false,
   };
+}
+
+/** Safety net: ensure ACAO is set on every response when origin is trusted. */
+export function corsHeadersMiddleware(req, res, next) {
+  const origin = req.headers.origin;
+  if (!origin) return next();
+
+  const allowedSet = buildAllowedOriginSet();
+  if (!isOriginAllowed(origin, allowedSet)) return next();
+
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Vary', 'Origin');
+
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+    res.setHeader('Access-Control-Max-Age', '86400');
+    return res.status(204).end();
+  }
+
+  next();
 }

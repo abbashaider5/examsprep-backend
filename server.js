@@ -69,10 +69,10 @@ if (!mongoBootError) {
 mongoose.set('bufferCommands', false);
 mongoose.set('bufferTimeoutMS', 1000);
 
-// ── CORS — production domains, Vercel previews, CLIENT_URL (+ www variant) ───
-const corsOptions = createCorsOptions();
-
+// ── CORS — must run first; fallback middleware guarantees ACAO on Vercel/serverless ─
 app.set('trust proxy', 1);
+app.use(corsHeadersMiddleware);
+const corsOptions = createCorsOptions();
 app.use(helmet({ crossOriginEmbedderPolicy: false, contentSecurityPolicy: false }));
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
@@ -88,6 +88,8 @@ if (process.env.NODE_ENV !== 'test') {
 // If Mongo isn't connected, return a helpful error for DB-backed endpoints.
 // (Without this, requests may hang or appear as proxy/network errors.)
 app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+
   const mongoReady = mongoose.connection.readyState === 1; // 1 = connected
   if (mongoReady) return next();
 
