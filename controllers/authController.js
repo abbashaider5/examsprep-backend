@@ -124,7 +124,7 @@ export const signup = async (req, res, next) => {
       });
     }
 
-    const { refreshToken } = setAuthCookies(res, user._id);
+    const { accessToken, refreshToken } = setAuthCookies(res, user._id);
     await User.findByIdAndUpdate(user._id, { refreshToken });
 
     if (settings.emailWelcomeEnabled) {
@@ -142,6 +142,7 @@ export const signup = async (req, res, next) => {
     res.status(201).json({
       message: 'Account created successfully',
       user: await buildUserResponse(user, {}),
+      accessToken,
       redirectPath,
     });
   } catch (err) { next(err); }
@@ -172,7 +173,7 @@ export const verifyOTP = async (req, res, next) => {
       }
     }
 
-    const { refreshToken } = setAuthCookies(res, user._id);
+    const { accessToken, refreshToken } = setAuthCookies(res, user._id);
     await User.findByIdAndUpdate(user._id, { refreshToken });
 
     await log({ user, action: 'otp_verified', category: 'auth', metadata: { purpose }, ...fromReq(req) });
@@ -187,7 +188,12 @@ export const verifyOTP = async (req, res, next) => {
       }
     }
 
-    res.json({ message: 'Verified successfully', user: await buildUserResponse(user, {}), redirectPath });
+    res.json({
+      message: 'Verified successfully',
+      user: await buildUserResponse(user, {}),
+      accessToken,
+      redirectPath,
+    });
   } catch (err) { next(err); }
 };
 
@@ -231,11 +237,15 @@ export const login = async (req, res, next) => {
       return beginTwoFactorLogin({ user, email, settings, req, res });
     }
 
-    const { refreshToken } = setAuthCookies(res, user._id);
+    const { accessToken, refreshToken } = setAuthCookies(res, user._id);
     await User.findByIdAndUpdate(user._id, { refreshToken });
 
     await log({ user, action: 'login', category: 'auth', ...fromReq(req) });
-    res.json({ message: 'Login successful', user: await buildUserResponse(user, {}) });
+    res.json({
+      message: 'Login successful',
+      user: await buildUserResponse(user, {}),
+      accessToken,
+    });
   } catch (err) { next(err); }
 };
 
@@ -295,7 +305,7 @@ export const googleAuth = async (req, res, next) => {
       return beginTwoFactorLogin({ user, email, settings, req, res });
     }
 
-    const { refreshToken } = setAuthCookies(res, user._id);
+    const { accessToken, refreshToken } = setAuthCookies(res, user._id);
     await User.findByIdAndUpdate(user._id, { refreshToken });
 
     await log({
@@ -316,6 +326,7 @@ export const googleAuth = async (req, res, next) => {
     res.json({
       message: isNewUser ? 'Account created with Google' : 'Signed in with Google',
       user: await buildUserResponse(user, {}),
+      accessToken,
       ...(redirectPath ? { redirectPath } : {}),
     });
   } catch (err) {
@@ -344,7 +355,7 @@ export const refreshAccessToken = async (req, res, next) => {
       sameSite: isProd() ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
-    res.json({ message: 'Token refreshed' });
+    res.json({ message: 'Token refreshed', accessToken });
   } catch (err) {
     next(new AppError('Invalid or expired refresh token', 401));
   }
@@ -369,7 +380,15 @@ export const logout = async (req, res) => {
 
 // ── Get Me ────────────────────────────────────────────────────────────────────
 export const getMe = async (req, res) => {
-  res.json({ user: await buildUserResponse(req.user, req) });
+  const effectiveId = req.user._id;
+  const accessToken = signAccessToken(
+    effectiveId,
+    req.isImpersonating && req.sessionUser?._id ? { impersonatorId: req.sessionUser._id } : {},
+  );
+  res.json({
+    user: await buildUserResponse(req.user, req),
+    accessToken,
+  });
 };
 
 // ── Forgot Password (request OTP) ─────────────────────────────────────────────

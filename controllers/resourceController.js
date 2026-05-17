@@ -50,9 +50,6 @@ export const uploadResource = async (req, res, next) => {
       return next(new AppError('Uploaded file is empty. Please choose the file again.', 400));
     }
 
-    const isPdf = (req.file.mimetype || '').toLowerCase().includes('pdf')
-      || lowerName.endsWith('.pdf');
-
     const resource = await Resource.create({
       title: title.trim(),
       originalName: req.file.originalname,
@@ -74,12 +71,12 @@ export const uploadResource = async (req, res, next) => {
     // Store raw file first so Retry works even if extraction/indexing fails (still extract from multer buffer).
     await storeResourceFileEarly(resource._id, fileBuffer, req.file.originalname || 'resource');
 
-    // Vercel: process PDF in-request so the multer buffer is never lost after the response.
-    if (process.env.VERCEL && isPdf) {
+    // Vercel: process in-request so the upload buffer is not lost after the HTTP response ends.
+    if (process.env.VERCEL) {
       try {
         await processResourceDocument(resource._id, { fileBuffer });
       } catch (procErr) {
-        logger.error(`[Resource] Inline PDF processing error for ${resource._id}: ${procErr.message}`);
+        logger.error(`[Resource] Inline processing error for ${resource._id}: ${procErr.message}`);
       }
       const updated = await Resource.findById(resource._id);
       res.status(201).json({ resource: updated || resource });
@@ -306,14 +303,11 @@ export const retryResourceProcessing = async (req, res, next) => {
       processingFailedStage: '',
     });
 
-    const isPdf = (resource.mimetype || '').toLowerCase().includes('pdf')
-      || (resource.originalName || '').toLowerCase().endsWith('.pdf');
-
-    if (process.env.VERCEL && isPdf) {
+    if (process.env.VERCEL) {
       try {
         await processResourceDocument(resource._id);
       } catch (procErr) {
-        logger.error(`[Resource] Inline PDF retry error for ${resource._id}: ${procErr.message}`);
+        logger.error(`[Resource] Inline retry error for ${resource._id}: ${procErr.message}`);
       }
     } else {
       enqueueResourceProcessing(resource._id);

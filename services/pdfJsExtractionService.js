@@ -299,41 +299,67 @@ export async function extractPdfWithPdfJs(buffer, opts = {}) {
     throw err;
   }
 
+  const usePdfParseFirst = Boolean(process.env.VERCEL) || process.env.PDF_EXTRACT_PRIMARY === 'pdf-parse';
+
+  /** @type {{ name: string, run: () => Promise<{ text: string, pages: number }> }[]} */
+  const engines = usePdfParseFirst
+    ? [
+        { name: 'pdf-parse', run: () => extractPdfWithPdfParse(normalized, { label: label || '' }) },
+        {
+          name: 'pdfjs',
+          run: () => extractTextViaPdfJs(normalized, {
+            onPage: (p, total) => {
+              if (total > 1) onStage?.(`Extracting PDF text… page ${p} of ${total}`);
+            },
+          }),
+        },
+      ]
+    : [
+        {
+          name: 'pdfjs',
+          run: () => extractTextViaPdfJs(normalized, {
+            onPage: (p, total) => {
+              if (total > 1) onStage?.(`Extracting PDF text… page ${p} of ${total}`);
+            },
+          }),
+        },
+        { name: 'pdf-parse', run: () => extractPdfWithPdfParse(normalized, { label: label || '' }) },
+      ];
+
   let result;
-  let pdfJsError = null;
-  try {
-    result = await extractTextViaPdfJs(normalized, {
-      onPage: (p, total) => {
-        if (total > 1) onStage?.(`Extracting PDF text… page ${p} of ${total}`);
-      },
-    });
-  } catch (e) {
-    pdfJsError = e;
-    logPdfExtract('pdfjs_primary_failed', {
-      label: label || '',
-      error: e?.message || String(e),
-    });
-    onStage?.('Trying alternate PDF reader…');
+  const errors = [];
+
+  for (let i = 0; i < engines.length; i += 1) {
+    const { name, run } = engines[i];
     try {
-      result = await extractPdfWithPdfParse(normalized, { label: label || '' });
-      logPdfExtract('pdf_parse_fallback_ok', {
+      logPdfExtract('engine_start', { engine: name, label: label || '' });
+      result = await run();
+      logPdfExtract('engine_ok', {
+        engine: name,
         label: label || '',
         pages: result.pages,
         textLen: result.text?.length || 0,
       });
-    } catch (fallbackErr) {
-      const classified = classifyPdfExtractError(pdfJsError);
-      logPdfExtract('extract_failed', {
-        label: label || '',
-        internalReason: classified.internalReason,
-        pdfjsError: pdfJsError?.message || String(pdfJsError),
-        pdfParseError: fallbackErr?.message || String(fallbackErr),
-      });
-      const err = new Error(classified.userMessage);
-      err.code = classified.code;
-      err.internalReason = classified.internalReason;
-      throw err;
+      break;
+    } catch (e) {
+      errors.push({ engine: name, error: e?.message || String(e) });
+      logPdfExtract('engine_failed', { engine: name, label: label || '', error: e?.message || String(e) });
+      if (i < engines.length - 1) onStage?.('Trying alternate PDF reader…');
     }
+  }
+
+  if (!result) {
+    const primary = errors[0]?.error || 'unknown';
+    const classified = classifyPdfExtractError(new Error(primary));
+    logPdfExtract('extract_failed', {
+      label: label || '',
+      internalReason: classified.internalReason,
+      engines: errors,
+    });
+    const err = new Error(classified.userMessage);
+    err.code = classified.code;
+    err.internalReason = classified.internalReason;
+    throw err;
   }
 
   const text = (result.text || '').trim();
