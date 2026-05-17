@@ -30,7 +30,7 @@ import { getSettings } from './models/SystemSettings.js';
 import logger from './utils/logger.js';
 import { seedHelpTopicsIfEmpty } from './utils/seedHelpTopics.js';
 import { scheduleProctoringScreenshotCleanup } from './services/proctoringScreenshotRetention.js';
-import { createCorsOptions } from './config/cors.js';
+import { corsHeadersMiddleware, createCorsOptions } from './config/cors.js';
 
 import adminRoutes from './routes/admin.js';
 import announcementRoutes from './routes/announcements.js';
@@ -55,14 +55,24 @@ import ticketRoutes from './routes/tickets.js';
 
 const app = express();
 
-// Connect DB before serving traffic (prevents intermittent 503 on startup).
+// Connect DB — on Vercel do not block cold start (long retry loops cause FUNCTION_INVOCATION_FAILED).
 let mongoBootError = null;
-await connectDB().catch((e) => {
-  mongoBootError = e;
-});
-if (!mongoBootError) {
-  await seedHelpTopicsIfEmpty().catch(() => {});
-  scheduleProctoringScreenshotCleanup();
+const isVercel = Boolean(process.env.VERCEL);
+
+const bootDb = async () => {
+  try {
+    await connectDB();
+    await seedHelpTopicsIfEmpty().catch(() => {});
+    if (!isVercel) scheduleProctoringScreenshotCleanup();
+  } catch (e) {
+    mongoBootError = e;
+  }
+};
+
+if (isVercel) {
+  bootDb().catch((e) => { mongoBootError = e; });
+} else {
+  await bootDb();
 }
 
 // If DB is down, fail fast (don't let Mongoose buffer requests indefinitely in dev)
@@ -169,8 +179,15 @@ app.use('/tickets', ticketRoutes);
 app.use('/help', helpRoutes);
 app.use('/enterprise', enterpriseRoutes);
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
-app.get('/health', (req, res) => res.json({ status: 'ok', env: process.env.NODE_ENV, time: new Date().toISOString() }));
+const healthPayload = () => ({
+  status: mongoose.connection.readyState === 1 ? 'ok' : 'degraded',
+  mongoReadyState: mongoose.connection.readyState,
+  env: process.env.NODE_ENV,
+  time: new Date().toISOString(),
+});
+
+app.get('/api/health', (req, res) => res.json(healthPayload()));
+app.get('/health', (req, res) => res.json(healthPayload()));
 
 // ── Serve React frontend in production ───────────────────────────────────────
 const clientDist = path.join(__dirname, '../client/dist');
@@ -204,7 +221,10 @@ app.get('*', (req, res, next) => {
 app.use('*', (req, res) => res.status(404).json({ message: `Route ${req.originalUrl} not found` }));
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => logger.info(`🚀 Server running on port ${PORT} [${process.env.NODE_ENV}]`));
+// Vercel serverless serves `export default app`; only listen for local / traditional hosting.
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 5000;
+  app.listen(PORT, () => logger.info(`🚀 Server running on port ${PORT} [${process.env.NODE_ENV}]`));
+}
 
 export default app;

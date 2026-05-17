@@ -24,7 +24,8 @@ export const connectDB = async () => {
   };
 
   const connectWithRetry = async (uri, label) => {
-    const maxAttempts = Number(process.env.MONGO_CONNECT_MAX_ATTEMPTS || 5);
+    const defaultAttempts = process.env.VERCEL ? 2 : 5;
+    const maxAttempts = Number(process.env.MONGO_CONNECT_MAX_ATTEMPTS || defaultAttempts);
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         return await tryConnect(uri, label);
