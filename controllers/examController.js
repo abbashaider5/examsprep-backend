@@ -32,7 +32,7 @@ import { isCambAiTtsConfigured, synthesizeExamNarration } from '../services/tts/
 import { previewSampleTextForStyle, voiceMetaFromAccent } from '../utils/listeningVoicePresets.js';
 import logger from '../utils/logger.js';
 import { log, fromReq } from '../utils/activityLogger.js';
-import { cleanExtractedText, cleanOcrExtractedText } from '../services/resourceChunkingService.js';
+import { cleanExtractedText, cleanOcrExtractedText, cleanPdfExtractedText } from '../services/resourceChunkingService.js';
 import { extractTextFromResourceBuffer } from '../services/resourceTextExtraction.js';
 import {
   computeExamUsageSnapshot,
@@ -43,6 +43,8 @@ import {
 
 const normalizeExtractedForExam = (ex) => {
   const raw = ex?.text || '';
+  const isPdf = ex?.format === 'pdf' || ex?.format === 'pdf_ocr';
+  if (isPdf) return cleanPdfExtractedText(raw);
   return ex?.usedOcr ? cleanOcrExtractedText(raw) : cleanExtractedText(raw);
 };
 
@@ -237,7 +239,7 @@ export const createExam = async (req, res, next) => {
       });
     } else if (resolvedContextText) {
       questions = await generateQuestionsFromText({
-        text: resolvedContextText, numQuestions: genQ, examType: examTypeEff, difficulty, mixedMcqPercent,
+        text: resolvedContextText, numQuestions: genQ, examType: examTypeEff, difficulty, mixedMcqPercent, topics: topics || [],
       });
     } else if (examTypeEff === 'descriptive') {
       questions = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: genQ, topics });
@@ -547,6 +549,7 @@ export const regenerateExam = async (req, res, next) => {
           examType: examTypeEff,
           difficulty,
           mixedMcqPercent: req.body.mixedMcqPercent ?? 50,
+          topics: topics || [],
         });
       }
     } else if (examTypeEff === 'descriptive') {

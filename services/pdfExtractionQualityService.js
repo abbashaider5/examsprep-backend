@@ -1,4 +1,4 @@
-import { isWeakPdfTextExtract } from './pdfHybridExtractionService.js';
+import { isWeakPdfTextExtract } from './pdfJsExtractionService.js';
 
 /**
  * Decide whether to run paid/heavy PDF→DOCX recovery while avoiding needless conversions.

@@ -17,6 +17,16 @@ export const cleanExtractedText = (raw) => {
   return deduped.join('\n').trim();
 };
 
+/** PDF text-layer cleanup before chunking (hyphenation, spacing). */
+export const cleanPdfExtractedText = (raw) => {
+  if (!raw || typeof raw !== 'string') return '';
+  let t = raw.replace(/\r\n/g, '\n');
+  t = t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFEFF]/g, '');
+  t = t.replace(/(\p{L})-\n(\p{L})/gu, '$1$2');
+  t = t.replace(/[ \t]{2,}/g, ' ');
+  return cleanExtractedText(t);
+};
+
 /**
  * Extra normalization after Tesseract: OCR noise, odd breaks, and junk lines before chunking/embeddings.
  */

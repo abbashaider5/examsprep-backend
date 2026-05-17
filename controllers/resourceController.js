@@ -2,8 +2,8 @@ import { AppError } from '../middleware/errorHandler.js';
 import Group from '../models/Group.js';
 import Resource from '../models/Resource.js';
 import ResourceChunk from '../models/ResourceChunk.js';
-import { deleteCloudinaryResource, downloadStoredResourceBuffer, uploadResourceFile } from '../services/cloudinaryService.js';
-import { cleanExtractedText, cleanOcrExtractedText } from '../services/resourceChunkingService.js';
+import { deleteCloudinaryResource, downloadStoredResourceBuffer } from '../services/cloudinaryService.js';
+import { cleanExtractedText, cleanOcrExtractedText, cleanPdfExtractedText } from '../services/resourceChunkingService.js';
 import { enqueueResourceProcessing } from '../services/resourceProcessingService.js';
 import { extractTextFromResourceBuffer } from '../services/resourceTextExtraction.js';
 import logger from '../utils/logger.js';
@@ -39,17 +39,16 @@ export const uploadResource = async (req, res, next) => {
       }
     }
 
-    // Upload to Cloudinary (no PDF parsing at upload time)
-    const uploaded = await uploadResourceFile(req.file.buffer, req.file.originalname);
-    if (!uploaded) return next(new AppError('File upload to storage failed. Please try again.', 502));
+    // Process from multer buffer first; Cloudinary is storage-only after indexing succeeds.
+    const fileBuffer = Buffer.from(req.file.buffer);
 
     const resource = await Resource.create({
       title: title.trim(),
       originalName: req.file.originalname,
       mimetype: req.file.mimetype,
       size: req.file.size,
-      cloudinaryUrl: uploaded.url,
-      cloudinaryPublicId: uploaded.publicId,
+      cloudinaryUrl: '',
+      cloudinaryPublicId: '',
       uploadedBy: req.user._id,
       enterpriseId: req.user.enterpriseId || null,
       subject,
@@ -63,7 +62,7 @@ export const uploadResource = async (req, res, next) => {
 
     res.status(201).json({ resource });
 
-    enqueueResourceProcessing(resource._id);
+    enqueueResourceProcessing(resource._id, { fileBuffer });
 
     // Invalidate caches after response is sent
     const cacheKeys = [`resources:mine:${req.user._id}`];
@@ -185,28 +184,32 @@ export const getResourceText = async (req, res, next) => {
     try {
       const extracted = await extractTextFromResourceBuffer(buffer, resource.originalName, resource.mimetype);
       const raw = extracted.text || '';
-      const normalized = extracted.usedOcr ? cleanOcrExtractedText(raw) : cleanExtractedText(raw);
+      const isPdf = (resource.originalName || '').toLowerCase().endsWith('.pdf')
+        || (resource.mimetype || '').toLowerCase() === 'application/pdf';
+      const normalized = isPdf ? cleanPdfExtractedText(raw) : (extracted.usedOcr ? cleanOcrExtractedText(raw) : cleanExtractedText(raw));
       text = normalized.slice(0, 60000);
       pages = extracted.pages || 0;
     } catch (e) {
       if (e.code === 'LEGACY_PPT') {
         return next(new AppError('Legacy .ppt is not supported. Save as .pptx and upload again.', 422));
       }
-      if (e.code === 'PDF_NOT_SUPPORTED') {
+      if (e.code === 'PDF_SCANNED') {
+        return next(new AppError(e.message || 'This PDF appears to be scanned or image-based. Upload Word (.docx) or a text-based PDF.', 422));
+      }
+      if (e.code === 'PDF_NOT_SUPPORTED' || e.code === 'EXTRACTION_FAILED') {
         return next(new AppError(e.message || 'This PDF could not be processed.', 422));
-      }
-      if (e.code === 'PDF_TOO_LARGE_FOR_OCR') {
-        return next(new AppError(e.message || 'PDF is too large for OCR.', 422));
-      }
-      if (e.code === 'OCR_TIMEOUT' || e.code === 'OCR_FAILED' || e.code === 'OCR_PAGE_TIMEOUT') {
-        return next(new AppError(e.message || 'OCR could not read this PDF.', 422));
       }
       logger.warn(`[Resource] Text extract failed for ${resource._id}: ${e.message}`);
       return next(new AppError('Could not read text from this file.', 422));
     }
 
     if (!text || text.length < 20) {
-      return next(new AppError('This file does not contain enough readable text.', 422));
+      return next(new AppError(
+        (resource.originalName || '').toLowerCase().endsWith('.pdf')
+          ? 'This PDF appears to be scanned or image-based. For best results, upload a Word file or text-based PDF.'
+          : 'This file does not contain enough readable text.',
+        422,
+      ));
     }
 
     res.json({ text, title: resource.title, pages, chars: text.length });
@@ -257,8 +260,11 @@ export const retryResourceProcessing = async (req, res, next) => {
     if (!isOwner && req.user.role !== 'admin') {
       return next(new AppError('Not authorized', 403));
     }
-    if (!resource.cloudinaryUrl) {
-      return next(new AppError('Resource file not available', 404));
+    if (!resource.cloudinaryUrl && !resource.cloudinaryPublicId) {
+      return next(new AppError(
+        'This resource has no stored file to retry from. Please upload the file again.',
+        404,
+      ));
     }
 
     await Resource.findByIdAndUpdate(resource._id, {

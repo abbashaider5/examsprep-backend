@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 import logger from '../utils/logger.js';
-import { extractPdfHybrid } from './pdfHybridExtractionService.js';
+import { extractPdfWithPdfJs } from './pdfJsExtractionService.js';
 
 const EXT = (name = '') => name.split('.').pop()?.toLowerCase() || '';
 
@@ -50,8 +50,8 @@ export const extractTextFromResourceBuffer = async (buffer, originalName = '', m
   }
 
   if (ext === 'pdf' || mt === 'application/pdf') {
-    const { text, pages, usedOcr } = await extractPdfHybrid(buffer, { onStage: onPdfStage });
-    return { text, pages, format: usedOcr ? 'pdf_ocr' : 'pdf', usedOcr };
+    const { text, pages } = await extractPdfWithPdfJs(buffer, { onStage: onPdfStage });
+    return { text, pages, format: 'pdf', usedOcr: false };
   }
 
   if (ext === 'docx' || mt.includes('wordprocessingml')) {
