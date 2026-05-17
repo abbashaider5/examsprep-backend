@@ -4,7 +4,12 @@ import Resource from '../models/Resource.js';
 import ResourceChunk from '../models/ResourceChunk.js';
 import { deleteCloudinaryResource, downloadStoredResourceBuffer } from '../services/cloudinaryService.js';
 import { cleanExtractedText, cleanOcrExtractedText, cleanPdfExtractedText } from '../services/resourceChunkingService.js';
-import { enqueueResourceProcessing, processResourceDocument } from '../services/resourceProcessingService.js';
+import {
+  enqueueResourceProcessing,
+  processResourceDocument,
+  storeResourceFileEarly,
+} from '../services/resourceProcessingService.js';
+import { isCloudinaryConfigured } from '../services/cloudinaryService.js';
 import { extractTextFromResourceBuffer } from '../services/resourceTextExtraction.js';
 import logger from '../utils/logger.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
@@ -65,6 +70,9 @@ export const uploadResource = async (req, res, next) => {
       processingErrorMessage: '',
       chunkCount: 0,
     });
+
+    // Store raw file first so Retry works even if extraction/indexing fails (still extract from multer buffer).
+    await storeResourceFileEarly(resource._id, fileBuffer, req.file.originalname || 'resource');
 
     // Vercel: process PDF in-request so the multer buffer is never lost after the response.
     if (process.env.VERCEL && isPdf) {
@@ -282,11 +290,12 @@ export const retryResourceProcessing = async (req, res, next) => {
     if (!isOwner && req.user.role !== 'admin') {
       return next(new AppError('Not authorized', 403));
     }
-    if (!resource.cloudinaryUrl && !resource.cloudinaryPublicId) {
-      return next(new AppError(
-        'This resource has no stored file to retry from. Please upload the file again.',
-        404,
-      ));
+    const hasStoredFile = Boolean(resource.cloudinaryUrl || resource.cloudinaryPublicId);
+    if (!hasStoredFile) {
+      const hint = isCloudinaryConfigured()
+        ? 'The original file was not saved to storage. Please upload the file again.'
+        : 'File storage is not configured on the server. Please upload the file again.';
+      return next(new AppError(hint, 404, { code: 'NO_STORED_FILE' }));
     }
 
     await Resource.findByIdAndUpdate(resource._id, {
@@ -297,7 +306,18 @@ export const retryResourceProcessing = async (req, res, next) => {
       processingFailedStage: '',
     });
 
-    enqueueResourceProcessing(resource._id);
+    const isPdf = (resource.mimetype || '').toLowerCase().includes('pdf')
+      || (resource.originalName || '').toLowerCase().endsWith('.pdf');
+
+    if (process.env.VERCEL && isPdf) {
+      try {
+        await processResourceDocument(resource._id);
+      } catch (procErr) {
+        logger.error(`[Resource] Inline PDF retry error for ${resource._id}: ${procErr.message}`);
+      }
+    } else {
+      enqueueResourceProcessing(resource._id);
+    }
 
     const cacheKeys = [`resources:mine:${resource.uploadedBy}`];
     if (resource.group) cacheKeys.push(`resources:group:${resource.group}`);

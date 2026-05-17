@@ -11,7 +11,11 @@ import { embedTexts, getEmbeddingModelLabel, isEmbeddingServiceEnabled } from '.
 import { extractTextFromResourceBuffer } from './resourceTextExtraction.js';
 import { logPdfExtract, pdfBufferFingerprint } from '../utils/pdfExtractionDiagnostics.js';
 import { delCache } from './cacheService.js';
-import { downloadStoredResourceBuffer, uploadResourceFile } from './cloudinaryService.js';
+import {
+  downloadStoredResourceBuffer,
+  isCloudinaryConfigured,
+  uploadResourceFile,
+} from './cloudinaryService.js';
 import { scheduleBackgroundWork } from '../utils/backgroundTask.js';
 
 const isPdfResource = (resource) => {
@@ -184,20 +188,49 @@ async function resolveFileBuffer(resource, fileBuffer) {
 }
 
 /**
- * Store original file on Cloudinary after indexing (storage only, not used for extraction).
+ * Persist the raw upload to Cloudinary immediately so Retry can re-download the file
+ * even when text extraction / indexing fails later.
+ * @returns {Promise<boolean>} true when a stored URL exists on the resource
+ */
+export async function storeResourceFileEarly(resourceId, fileBuffer, originalName = 'resource') {
+  if (!fileBuffer?.length) return false;
+
+  const existing = await Resource.findById(resourceId).select('cloudinaryUrl cloudinaryPublicId');
+  if (existing?.cloudinaryUrl && existing?.cloudinaryPublicId) return true;
+
+  if (!isCloudinaryConfigured()) {
+    logger.warn(`[resourceProcessing] Cloudinary not configured; resource ${resourceId} cannot be retried after failure`);
+    return false;
+  }
+
+  const uploaded = await uploadResourceFile(fileBuffer, originalName);
+  if (!uploaded?.url || !uploaded?.publicId) {
+    logger.warn(`[resourceProcessing] Early Cloudinary store failed for ${resourceId}`);
+    return false;
+  }
+
+  const resource = await Resource.findByIdAndUpdate(
+    resourceId,
+    { cloudinaryUrl: uploaded.url, cloudinaryPublicId: uploaded.publicId },
+    { new: true },
+  );
+  if (resource) await invalidateResourceCaches(resource);
+  logger.info(`[resourceProcessing] Stored original file for ${resourceId} (retry-safe)`);
+  return true;
+}
+
+/**
+ * Store original file on Cloudinary after indexing if not already stored at upload time.
  */
 async function persistOriginalToCloudinary(resourceId, resource, fileBuffer) {
+  const fresh = await Resource.findById(resourceId).select('cloudinaryUrl cloudinaryPublicId uploadedBy group scope');
+  if (fresh?.cloudinaryUrl && fresh?.cloudinaryPublicId) return;
+
   if (!fileBuffer?.length) return;
-  const uploaded = await uploadResourceFile(fileBuffer, resource.originalName || 'resource');
-  if (!uploaded?.url || !uploaded?.publicId) {
+  const stored = await storeResourceFileEarly(resourceId, fileBuffer, resource.originalName || 'resource');
+  if (!stored) {
     logger.warn(`[resourceProcessing] Indexed ${resourceId} but Cloudinary storage upload failed`);
-    return;
   }
-  await Resource.findByIdAndUpdate(resourceId, {
-    cloudinaryUrl: uploaded.url,
-    cloudinaryPublicId: uploaded.publicId,
-  });
-  await invalidateResourceCaches(resource);
 }
 
 /**
