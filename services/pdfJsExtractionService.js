@@ -8,7 +8,20 @@ import { pathToFileURL } from 'node:url';
 import logger from '../utils/logger.js';
 
 const require = createRequire(import.meta.url);
-const pdfjsPath = path.dirname(require.resolve('pdfjs-dist/package.json'));
+
+let _pdfjsPath = null;
+function getPdfjsPath() {
+  if (_pdfjsPath) return _pdfjsPath;
+  try {
+    _pdfjsPath = path.dirname(require.resolve('pdfjs-dist/package.json'));
+    return _pdfjsPath;
+  } catch (e) {
+    throw new Error(
+      'pdfjs-dist is not installed. Add it to server dependencies (npm install pdfjs-dist).',
+      { cause: e },
+    );
+  }
+}
 
 const PDF_SIG = [0x25, 0x50, 0x44, 0x46]; // %PDF
 
@@ -128,6 +141,7 @@ async function extractTextViaPdfJs(buffer, opts = {}) {
   const data = Uint8Array.from(buffer);
   if (data.length < 20) throw new Error('PDF data too small');
 
+  const pdfjsPath = getPdfjsPath();
   const cMapUrl = pdfJsDirUrl(path.join(pdfjsPath, 'cmaps'));
   /** @type {Record<string, unknown>[]} */
   const docInitVariants = [
