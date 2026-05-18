@@ -188,6 +188,38 @@ async function resolveFileBuffer(resource, fileBuffer) {
 }
 
 /**
+ * Prefer Cloudinary-stored bytes on Vercel for PDFs (canonical copy after binary upload).
+ * @param {import('mongoose').Document} resource
+ * @param {Buffer | null} uploadBuffer
+ */
+async function resolveExtractionBuffer(resource, uploadBuffer) {
+  if (
+    process.env.VERCEL
+    && isPdfResource(resource)
+    && (resource.cloudinaryPublicId || resource.cloudinaryUrl)
+  ) {
+    try {
+      const fromCloud = await downloadStoredResourceBuffer({
+        cloudinaryUrl: resource.cloudinaryUrl,
+        cloudinaryPublicId: resource.cloudinaryPublicId,
+      });
+      if (fromCloud?.length) {
+        const fp = pdfBufferFingerprint(fromCloud);
+        logPdfExtract('extraction_buffer', {
+          resourceId: String(resource._id),
+          source: 'cloudinary',
+          ...fp,
+        });
+        return fromCloud;
+      }
+    } catch (e) {
+      logger.warn(`[resourceProcessing] Cloudinary PDF buffer fallback: ${e.message}`);
+    }
+  }
+  return resolveFileBuffer(resource, uploadBuffer);
+}
+
+/**
  * Persist the raw upload to Cloudinary immediately so Retry can re-download the file
  * even when text extraction / indexing fails later.
  * @returns {Promise<boolean>} true when a stored URL exists on the resource
@@ -253,7 +285,7 @@ export const processResourceDocument = async (resourceId, opts = {}) => {
 
   let buffer;
   try {
-    buffer = await resolveFileBuffer(resource, uploadBuffer);
+    buffer = await resolveExtractionBuffer(resource, uploadBuffer);
     if (isPdfResource(resource)) {
       const fp = pdfBufferFingerprint(buffer);
       logPdfExtract('resource_upload_buffer', {

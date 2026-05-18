@@ -12,6 +12,7 @@ import {
   pdfBufferFingerprint,
 } from '../utils/pdfExtractionDiagnostics.js';
 import { extractPdfWithPdfParse } from './pdfParseFallbackService.js';
+import { extractPdfWithUnpdf } from './unpdfExtractionService.js';
 
 const require = createRequire(import.meta.url);
 
@@ -193,6 +194,9 @@ export function isWeakPdfTextExtract(text, pageCount) {
   const pages = Math.max(1, pageCount || 1);
   const letters = (t.match(/\p{L}/gu) || []).length;
 
+  if (!t.length) return true;
+  if (t.length >= 12 && letters >= 8 && letters / t.length >= 0.35) return false;
+
   if (pages === 1 && t.length >= 28 && letters >= 18 && letters / t.length >= 0.35) {
     const weird = (t.match(/\uFFFD/g) || []).length;
     if (weird <= 2) return false;
@@ -275,6 +279,33 @@ async function extractTextViaPdfJs(buffer, opts = {}) {
   throw lastErr;
 }
 
+/**
+ * Single minimal pdf.js pass (no CDN fetches) — last resort on serverless.
+ * @param {Buffer} buffer
+ * @param {{ onPage?: (pageNum: number, total: number) => void }} [opts]
+ */
+async function extractTextViaPdfJsMinimal(buffer, opts = {}) {
+  const { pdfjs, disableWorker } = getPdfJsRuntime();
+  const docInit = {
+    data: new Uint8Array(buffer),
+    verbosity: 0,
+    isEvalSupported: false,
+    disableFontFace: true,
+    useSystemFonts: false,
+    disableWorker: Boolean(disableWorker),
+    disableAutoFetch: true,
+    useWorkerFetch: false,
+  };
+  logPdfExtract('getDocument_start', { variant: 'minimal-only', bytes: buffer.length });
+  const pdfDocument = await pdfjs.getDocument(docInit).promise;
+  logPdfExtract('getDocument_ok', { variant: 'minimal-only', numPages: pdfDocument.numPages });
+  try {
+    return await readTextFromPdfDocument(pdfDocument, opts);
+  } finally {
+    await pdfDocument.cleanup?.().catch(() => {});
+  }
+}
+
 const SCANNED_USER_MESSAGE =
   'This PDF appears to be scanned or image-based. For best results, upload a Word (.docx) file or a text-based PDF exported from your original document.';
 
@@ -299,32 +330,24 @@ export async function extractPdfWithPdfJs(buffer, opts = {}) {
     throw err;
   }
 
-  const usePdfParseFirst = Boolean(process.env.VERCEL) || process.env.PDF_EXTRACT_PRIMARY === 'pdf-parse';
+  const pageOpts = {
+    onPage: (p, total) => {
+      if (total > 1) onStage?.(`Extracting PDF text… page ${p} of ${total}`);
+    },
+  };
 
+  /** unpdf first everywhere (serverless-safe); pdf-parse + pdfjs as fallbacks. */
   /** @type {{ name: string, run: () => Promise<{ text: string, pages: number }> }[]} */
-  const engines = usePdfParseFirst
-    ? [
-        { name: 'pdf-parse', run: () => extractPdfWithPdfParse(normalized, { label: label || '' }) },
-        {
-          name: 'pdfjs',
-          run: () => extractTextViaPdfJs(normalized, {
-            onPage: (p, total) => {
-              if (total > 1) onStage?.(`Extracting PDF text… page ${p} of ${total}`);
-            },
-          }),
-        },
-      ]
-    : [
-        {
-          name: 'pdfjs',
-          run: () => extractTextViaPdfJs(normalized, {
-            onPage: (p, total) => {
-              if (total > 1) onStage?.(`Extracting PDF text… page ${p} of ${total}`);
-            },
-          }),
-        },
-        { name: 'pdf-parse', run: () => extractPdfWithPdfParse(normalized, { label: label || '' }) },
-      ];
+  const engines = [
+    { name: 'unpdf', run: () => extractPdfWithUnpdf(normalized, { label: label || '' }) },
+    { name: 'pdf-parse', run: () => extractPdfWithPdfParse(normalized, { label: label || '' }) },
+    {
+      name: 'pdfjs',
+      run: () => (process.env.VERCEL
+        ? extractTextViaPdfJsMinimal(normalized, pageOpts)
+        : extractTextViaPdfJs(normalized, pageOpts)),
+    },
+  ];
 
   let result;
   const errors = [];

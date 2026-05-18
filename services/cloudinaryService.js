@@ -62,24 +62,22 @@ export const deleteCloudinaryScreenshot = async (publicId) => {
  */
 export const uploadResourceFile = async (buffer, originalName = 'resource', folder = 'examprep/resources') => {
   if (!isCloudinaryConfigured()) return null;
+  configure();
   try {
-    const base64 = buffer.toString('base64');
-    const ext = originalName.split('.').pop()?.toLowerCase() || 'pdf';
-    const mimeMap = {
-      pdf: 'application/pdf',
-      doc: 'application/msword',
-      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      ppt: 'application/vnd.ms-powerpoint',
-      pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      txt: 'text/plain',
-    };
-    const mime = mimeMap[ext] || 'application/octet-stream';
-    const dataUri = `data:${mime};base64,${base64}`;
     const safePublicId = `${Date.now()}_${originalName.replace(/[^a-z0-9._-]/gi, '_')}`;
-    const result = await cloudinary.uploader.upload(dataUri, {
-      folder,
-      resource_type: 'raw',
-      public_id: safePublicId,
+    const result = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder,
+          resource_type: 'raw',
+          public_id: safePublicId,
+        },
+        (err, uploaded) => {
+          if (err) reject(err);
+          else resolve(uploaded);
+        },
+      );
+      stream.end(Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer));
     });
     return { url: result.secure_url, publicId: result.public_id };
   } catch (err) {
