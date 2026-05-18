@@ -1,3 +1,4 @@
+import '../utils/runtimePolyfills.js';
 import { extractText, getDocumentProxy } from 'unpdf';
 import { logPdfExtract } from '../utils/pdfExtractionDiagnostics.js';
 

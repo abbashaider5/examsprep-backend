@@ -157,9 +157,11 @@ const handleExtractError = async (resourceId, e) => {
       'extract',
     );
   } else {
+    const internal = (e?.internalReason || e?.message || '').slice(0, 200);
+    logger.warn(`[resourceProcessing] extract error ${resourceId}: code=${e.code} internal=${internal}`);
     await fail(
       resourceId,
-      'EXTRACTION_FAILED',
+      e.code && e.code !== 'EXTRACTION_FAILED' ? e.code : 'EXTRACTION_FAILED',
       msg || 'We could not read text from this file. Try another export or format.',
       'extract',
     );
@@ -193,28 +195,14 @@ async function resolveFileBuffer(resource, fileBuffer) {
  * @param {Buffer | null} uploadBuffer
  */
 async function resolveExtractionBuffer(resource, uploadBuffer) {
-  if (
-    process.env.VERCEL
-    && isPdfResource(resource)
-    && (resource.cloudinaryPublicId || resource.cloudinaryUrl)
-  ) {
-    try {
-      const fromCloud = await downloadStoredResourceBuffer({
-        cloudinaryUrl: resource.cloudinaryUrl,
-        cloudinaryPublicId: resource.cloudinaryPublicId,
-      });
-      if (fromCloud?.length) {
-        const fp = pdfBufferFingerprint(fromCloud);
-        logPdfExtract('extraction_buffer', {
-          resourceId: String(resource._id),
-          source: 'cloudinary',
-          ...fp,
-        });
-        return fromCloud;
-      }
-    } catch (e) {
-      logger.warn(`[resourceProcessing] Cloudinary PDF buffer fallback: ${e.message}`);
-    }
+  if (uploadBuffer?.length) {
+    const fp = pdfBufferFingerprint(uploadBuffer);
+    logPdfExtract('extraction_buffer', {
+      resourceId: String(resource._id),
+      source: 'upload',
+      ...fp,
+    });
+    return uploadBuffer;
   }
   return resolveFileBuffer(resource, uploadBuffer);
 }

@@ -9,6 +9,7 @@ import {
   getResourceText,
   retryResourceProcessing,
   uploadResource,
+  uploadResourceBytes,
 } from '../controllers/resourceController.js';
 import { protect } from '../middleware/auth.js';
 
@@ -31,6 +32,7 @@ const upload = multer({
 const router = express.Router();
 router.use(protect);
 
+router.post('/upload-bytes', uploadResourceBytes);
 router.post('/', upload.single('file'), uploadResource);
 router.get('/admin', getAdminResources);
 router.get('/mine', getMyResources);

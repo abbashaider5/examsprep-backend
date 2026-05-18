@@ -1,3 +1,4 @@
+import './utils/runtimePolyfills.js';
 import dns from 'node:dns';
 /** Prefer IPv4 before first outbound connections (helps Cloudinary/CDN on some Windows dual-stack setups). */
 if (typeof dns.setDefaultResultOrder === 'function') {

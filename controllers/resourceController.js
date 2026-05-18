@@ -13,6 +13,8 @@ import { isCloudinaryConfigured } from '../services/cloudinaryService.js';
 import { extractTextFromResourceBuffer } from '../services/resourceTextExtraction.js';
 import logger from '../utils/logger.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
+import { RESOURCE_UPLOAD_MAX_BYTES } from '../config/uploadLimits.js';
+import { pdfBufferFingerprint } from '../utils/pdfExtractionDiagnostics.js';
 
 function canUseInstructorResourceApis(user) {
   if (!user) return false;
@@ -20,76 +22,147 @@ function canUseInstructorResourceApis(user) {
   return Boolean(user.isInstructor) || ['instructor', 'principal'].includes(user.role);
 }
 
+/**
+ * @param {import('express').Request} req
+ * @param {{ buffer: Buffer, originalName: string, mimetype: string, size: number, title: string, groupId?: string, subject?: string, uploadChannel?: string }} input
+ */
+async function ingestResourceUpload(req, res, next, input) {
+  const { buffer, originalName, mimetype, size, title, groupId, subject: subjectRaw, uploadChannel } = input;
+  const lowerName = (originalName || '').toLowerCase();
+
+  if (!title?.trim()) return next(new AppError('Title is required', 400));
+  if (!buffer?.length) return next(new AppError('Uploaded file is empty. Please choose the file again.', 400));
+  if (buffer.length > RESOURCE_UPLOAD_MAX_BYTES) {
+    return next(new AppError(
+      process.env.VERCEL
+        ? 'File is too large for production upload (max 4.5 MB).'
+        : 'File is too large (max 20 MB).',
+      413,
+    ));
+  }
+
+  const isAdmin = req.user.role === 'admin';
+  if (!isAdmin && !canUseInstructorResourceApis(req.user)) return next(new AppError('Not authorized', 403));
+
+  let group = null;
+  if (!isAdmin && groupId) {
+    group = await Group.findById(groupId);
+    if (!group) return next(new AppError('Group not found', 404));
+    if (group.instructor.toString() !== req.user._id.toString()) {
+      return next(new AppError('Not your group', 403));
+    }
+  }
+
+  const subject = typeof subjectRaw === 'string' ? subjectRaw.trim().slice(0, 200) : '';
+  const fileBuffer = Buffer.from(buffer);
+
+  if (lowerName.endsWith('.pdf') || (mimetype || '').includes('pdf')) {
+    const fp = pdfBufferFingerprint(fileBuffer);
+    logger.info('[Resource] PDF upload received', {
+      channel: uploadChannel || 'multipart',
+      ...fp,
+      userId: String(req.user._id),
+    });
+    if (!fp.hasPdfSig) {
+      return next(new AppError(
+        'The PDF did not upload correctly (invalid file header). Try uploading again or use Word (.docx).',
+        400,
+      ));
+    }
+  }
+
+  const resource = await Resource.create({
+    title: title.trim(),
+    originalName: originalName || 'resource',
+    mimetype: mimetype || 'application/octet-stream',
+    size: size || fileBuffer.length,
+    cloudinaryUrl: '',
+    cloudinaryPublicId: '',
+    uploadedBy: req.user._id,
+    enterpriseId: req.user.enterpriseId || null,
+    subject,
+    scope: isAdmin ? 'admin' : 'instructor',
+    group: group ? group._id : null,
+    processingStatus: 'processing',
+    processingErrorCode: '',
+    processingErrorMessage: '',
+    chunkCount: 0,
+  });
+
+  await storeResourceFileEarly(resource._id, fileBuffer, originalName || 'resource');
+
+  if (process.env.VERCEL) {
+    try {
+      await processResourceDocument(resource._id, { fileBuffer });
+    } catch (procErr) {
+      logger.error(`[Resource] Inline processing error for ${resource._id}: ${procErr.message}`);
+    }
+    const updated = await Resource.findById(resource._id);
+    res.status(201).json({ resource: updated || resource });
+  } else {
+    res.status(201).json({ resource });
+    enqueueResourceProcessing(resource._id, { fileBuffer });
+  }
+
+  const cacheKeys = [`resources:mine:${req.user._id}`];
+  if (group) cacheKeys.push(`resources:group:${group._id}`);
+  if (isAdmin) cacheKeys.push('resources:admin');
+  delCache(...cacheKeys).catch(() => {});
+}
+
 // ── Upload a resource (admin or instructor) ────────────────────────────────
 export const uploadResource = async (req, res, next) => {
   try {
     if (!req.file) return next(new AppError('No file uploaded', 400));
-    const lowerName = (req.file.originalname || '').toLowerCase();
     const { title, groupId, subject: subjectRaw } = req.body;
-    if (!title?.trim()) return next(new AppError('Title is required', 400));
-    const subject = typeof subjectRaw === 'string' ? subjectRaw.trim().slice(0, 200) : '';
-
-    const isAdmin = req.user.role === 'admin';
-    if (!isAdmin && !canUseInstructorResourceApis(req.user)) return next(new AppError('Not authorized', 403));
-
-    // Instructor uploads: optional groupId — when omitted, file is a personal library resource (e.g. exam creation / school mode).
-    let group = null;
-    if (!isAdmin) {
-      if (groupId) {
-        group = await Group.findById(groupId);
-        if (!group) return next(new AppError('Group not found', 404));
-        if (group.instructor.toString() !== req.user._id.toString()) {
-          return next(new AppError('Not your group', 403));
-        }
-      }
-    }
-
-    // Process from multer buffer first; Cloudinary is storage-only after indexing succeeds.
-    const fileBuffer = Buffer.from(req.file.buffer);
-    if (!fileBuffer.length) {
-      return next(new AppError('Uploaded file is empty. Please choose the file again.', 400));
-    }
-
-    const resource = await Resource.create({
-      title: title.trim(),
+    await ingestResourceUpload(req, res, next, {
+      buffer: req.file.buffer,
       originalName: req.file.originalname,
       mimetype: req.file.mimetype,
       size: req.file.size,
-      cloudinaryUrl: '',
-      cloudinaryPublicId: '',
-      uploadedBy: req.user._id,
-      enterpriseId: req.user.enterpriseId || null,
-      subject,
-      scope: isAdmin ? 'admin' : 'instructor',
-      group: group ? group._id : null,
-      processingStatus: 'processing',
-      processingErrorCode: '',
-      processingErrorMessage: '',
-      chunkCount: 0,
+      title,
+      groupId,
+      subject: subjectRaw,
+      uploadChannel: 'multipart',
     });
+  } catch (err) { next(err); }
+};
 
-    // Store raw file first so Retry works even if extraction/indexing fails (still extract from multer buffer).
-    await storeResourceFileEarly(resource._id, fileBuffer, req.file.originalname || 'resource');
+/** JSON base64 upload — avoids multipart corruption through Vercel proxies. */
+export const uploadResourceBytes = async (req, res, next) => {
+  try {
+    const {
+      fileBase64,
+      originalName,
+      mimetype,
+      size,
+      title,
+      groupId,
+      subject: subjectRaw,
+    } = req.body || {};
 
-    // Vercel: process in-request so the upload buffer is not lost after the HTTP response ends.
-    if (process.env.VERCEL) {
-      try {
-        await processResourceDocument(resource._id, { fileBuffer });
-      } catch (procErr) {
-        logger.error(`[Resource] Inline processing error for ${resource._id}: ${procErr.message}`);
-      }
-      const updated = await Resource.findById(resource._id);
-      res.status(201).json({ resource: updated || resource });
-    } else {
-      res.status(201).json({ resource });
-      enqueueResourceProcessing(resource._id, { fileBuffer });
+    if (!fileBase64 || typeof fileBase64 !== 'string') {
+      return next(new AppError('fileBase64 is required', 400));
     }
 
-    // Invalidate caches after response is sent
-    const cacheKeys = [`resources:mine:${req.user._id}`];
-    if (group) cacheKeys.push(`resources:group:${group._id}`);
-    if (isAdmin) cacheKeys.push('resources:admin');
-    delCache(...cacheKeys).catch(() => {});
+    const stripped = fileBase64.replace(/^data:[^;]+;base64,/, '').trim();
+    let buffer;
+    try {
+      buffer = Buffer.from(stripped, 'base64');
+    } catch {
+      return next(new AppError('Invalid file encoding', 400));
+    }
+
+    await ingestResourceUpload(req, res, next, {
+      buffer,
+      originalName: originalName || 'upload.pdf',
+      mimetype: mimetype || 'application/pdf',
+      size: Number(size) || buffer.length,
+      title,
+      groupId,
+      subject: subjectRaw,
+      uploadChannel: 'base64-json',
+    });
   } catch (err) { next(err); }
 };
 
