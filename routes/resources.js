@@ -33,26 +33,33 @@ const upload = multer({
 const router = express.Router();
 router.use(protect);
 
-/** True when the client sent browser-extracted PDF text (not a multipart file). */
+/** Browser PDF text import (query flag survives Vercel proxies reliably). */
 function isBrowserTextImport(req) {
+  if (req.query.import === 'text') return true;
   if (req.get('x-resource-import') === 'text') return true;
   if (req.body?.importMode === 'text') return true;
   const text = req.body?.text;
-  if (typeof text !== 'string' || !text.trim()) return false;
-  const ct = String(req.headers['content-type'] || '').toLowerCase();
-  if (ct.includes('multipart/form-data')) return false;
-  return true;
+  return typeof text === 'string' && text.trim().length > 0;
 }
 
-/** Shared POST /api/resources — JSON text (browser PDF) or multipart file. */
+/** Shared POST /api/resources — PDF text fields or multipart file upload. */
 export const handleResourceCreatePost = (req, res, next) => {
-  if (isBrowserTextImport(req)) {
-    return importResourceText(req, res, next);
+  if (!isBrowserTextImport(req)) {
+    return upload.single('file')(req, res, (err) => {
+      if (err) return next(err);
+      uploadResource(req, res, next);
+    });
   }
-  upload.single('file')(req, res, (err) => {
-    if (err) return next(err);
-    uploadResource(req, res, next);
-  });
+
+  const ct = String(req.headers['content-type'] || '').toLowerCase();
+  if (ct.includes('multipart/form-data')) {
+    return upload.none()(req, res, (err) => {
+      if (err) return next(err);
+      importResourceText(req, res, next);
+    });
+  }
+
+  return importResourceText(req, res, next);
 };
 
 router.post('/import-text', importResourceText);
