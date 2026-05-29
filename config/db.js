@@ -1,11 +1,17 @@
 import mongoose from 'mongoose';
 
+const isVercel = Boolean(process.env.VERCEL);
+
 const connectOptions = () => ({
-  serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS || 20000),
-  connectTimeoutMS: Number(process.env.MONGO_CONNECT_TIMEOUT_MS || 20000),
+  serverSelectionTimeoutMS: Number(
+    process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS || (isVercel ? 30000 : 20000),
+  ),
+  connectTimeoutMS: Number(process.env.MONGO_CONNECT_TIMEOUT_MS || (isVercel ? 30000 : 20000)),
   socketTimeoutMS: Number(process.env.MONGO_SOCKET_TIMEOUT_MS || 45000),
-  maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE || 10),
-  minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE || 0),
+  maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE || (isVercel ? 5 : 10)),
+  minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE || (isVercel ? 1 : 0)),
+  /** Vercel/AWS often need IPv4 to reach MongoDB Atlas reliably. */
+  family: Number(process.env.MONGO_IP_FAMILY || 4),
 });
 
 /** Reuse one connection across Vercel serverless invocations (warm instances). */
@@ -27,7 +33,7 @@ async function tryConnect(uri, label) {
 }
 
 async function connectWithRetry(uri, label) {
-  const defaultAttempts = process.env.VERCEL ? 2 : 5;
+  const defaultAttempts = isVercel ? 5 : 5;
   const maxAttempts = Number(process.env.MONGO_CONNECT_MAX_ATTEMPTS || defaultAttempts);
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
@@ -97,7 +103,7 @@ export const connectDB = async () => {
     return await cache.promise;
   } catch (e) {
     cache.promise = null;
-    return null;
+    throw e;
   }
 };
 
@@ -112,8 +118,8 @@ export async function ensureDbConnected() {
   if (mongoose.connection.readyState === 1) return true;
 
   const cache = getConnectionCache();
-  const maxAttempts = Number(process.env.MONGO_ENSURE_MAX_ATTEMPTS || (process.env.VERCEL ? 5 : 3));
-  const baseDelayMs = Number(process.env.MONGO_ENSURE_RETRY_MS || 400);
+  const maxAttempts = Number(process.env.MONGO_ENSURE_MAX_ATTEMPTS || (isVercel ? 10 : 3));
+  const baseDelayMs = Number(process.env.MONGO_ENSURE_RETRY_MS || (isVercel ? 750 : 400));
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (mongoose.connection.readyState === 1) return true;

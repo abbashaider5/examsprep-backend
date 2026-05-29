@@ -73,7 +73,11 @@ const bootDb = async () => {
 };
 
 if (isVercel) {
-  bootDb().catch((e) => { mongoBootError = e; });
+  bootDb().catch((e) => {
+    mongoBootError = e;
+    // eslint-disable-next-line no-console
+    console.error('MongoDB boot failed:', e?.message || e);
+  });
 } else {
   await bootDb();
 }
@@ -113,13 +117,11 @@ app.use(async (req, res, next) => {
   return res.status(503).json({
     message: 'Database is temporarily unavailable. Please try again in a few seconds.',
     code: 'DB_UNAVAILABLE',
-    details:
-      process.env.NODE_ENV === 'development' || process.env.VERCEL_ENV === 'preview'
-        ? {
-            mongoReadyState: mongoose.connection.readyState,
-            bootError: mongoBootError?.message || null,
-          }
-        : undefined,
+    retryAfterSeconds: 3,
+    details: {
+      mongoReadyState: mongoose.connection.readyState,
+      bootError: mongoBootError?.message || null,
+    },
   });
 });
 
