@@ -6,7 +6,9 @@ import { deleteCloudinaryResource, downloadStoredResourceBuffer } from '../servi
 import { cleanExtractedText, cleanOcrExtractedText, cleanPdfExtractedText } from '../services/resourceChunkingService.js';
 import {
   enqueueResourceProcessing,
+  enqueueResourceTextProcessing,
   processResourceDocument,
+  processResourceFromClientText,
   storeResourceFileEarly,
 } from '../services/resourceProcessingService.js';
 import { isCloudinaryConfigured } from '../services/cloudinaryService.js';
@@ -125,6 +127,89 @@ export const uploadResource = async (req, res, next) => {
       subject: subjectRaw,
       uploadChannel: 'multipart',
     });
+  } catch (err) { next(err); }
+};
+
+/** Text extracted in the browser (pdf.js) — uses standard POST /api/resources/import-text. */
+export const importResourceText = async (req, res, next) => {
+  try {
+    const {
+      title,
+      text,
+      originalName,
+      pageCount,
+      groupId,
+      subject: subjectRaw,
+      mimetype,
+      size,
+    } = req.body || {};
+
+    const raw = typeof text === 'string' ? text : '';
+    if (!raw.trim()) return next(new AppError('Document text is required', 400));
+    if (raw.length > 2_500_000) {
+      return next(new AppError('Extracted text is too large. Try a shorter PDF or Word (.docx).', 413));
+    }
+
+    const isAdmin = req.user.role === 'admin';
+    if (!isAdmin && !canUseInstructorResourceApis(req.user)) return next(new AppError('Not authorized', 403));
+
+    if (!title?.trim()) return next(new AppError('Title is required', 400));
+
+    let group = null;
+    if (!isAdmin && groupId) {
+      group = await Group.findById(groupId);
+      if (!group) return next(new AppError('Group not found', 404));
+      if (group.instructor.toString() !== req.user._id.toString()) {
+        return next(new AppError('Not your group', 403));
+      }
+    }
+
+    const subject = typeof subjectRaw === 'string' ? subjectRaw.trim().slice(0, 200) : '';
+    const name = (originalName || 'document.pdf').slice(0, 255);
+    const pages = Math.max(0, Number(pageCount) || 0);
+
+    const resource = await Resource.create({
+      title: title.trim(),
+      originalName: name,
+      mimetype: mimetype || 'application/pdf',
+      size: Number(size) || raw.length,
+      cloudinaryUrl: '',
+      cloudinaryPublicId: '',
+      uploadedBy: req.user._id,
+      enterpriseId: req.user.enterpriseId || null,
+      subject,
+      scope: isAdmin ? 'admin' : 'instructor',
+      group: group ? group._id : null,
+      processingStatus: 'processing',
+      processingErrorCode: '',
+      processingErrorMessage: '',
+      chunkCount: 0,
+    });
+
+    logger.info('[Resource] Client PDF text import', {
+      resourceId: String(resource._id),
+      chars: raw.length,
+      pages,
+      userId: String(req.user._id),
+    });
+
+    if (process.env.VERCEL) {
+      try {
+        await processResourceFromClientText(resource._id, raw, { pageCount: pages });
+      } catch (procErr) {
+        logger.error(`[Resource] Client-text processing error for ${resource._id}: ${procErr.message}`);
+      }
+      const updated = await Resource.findById(resource._id);
+      res.status(201).json({ resource: updated || resource });
+    } else {
+      res.status(201).json({ resource });
+      enqueueResourceTextProcessing(resource._id, raw, { pageCount: pages });
+    }
+
+    const cacheKeys = [`resources:mine:${req.user._id}`];
+    if (group) cacheKeys.push(`resources:group:${group._id}`);
+    if (isAdmin) cacheKeys.push('resources:admin');
+    delCache(...cacheKeys).catch(() => {});
   } catch (err) { next(err); }
 };
 

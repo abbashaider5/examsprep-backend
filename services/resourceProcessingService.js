@@ -258,6 +258,61 @@ async function persistOriginalToCloudinary(resourceId, resource, fileBuffer) {
  * @param {import('mongoose').Types.ObjectId|string} resourceId
  * @param {{ fileBuffer?: Buffer | null }} [opts] — multer buffer from upload; omit on retry (uses Cloudinary fallback)
  */
+/**
+ * Index a resource from text already extracted in the browser (skips server PDF parsers).
+ * @param {import('mongoose').Types.ObjectId|string} resourceId
+ * @param {string} rawText
+ * @param {{ pageCount?: number }} [opts]
+ */
+export const processResourceFromClientText = async (resourceId, rawText, opts = {}) => {
+  const resource = await Resource.findById(resourceId);
+  if (!resource) return;
+
+  await Resource.findByIdAndUpdate(resourceId, {
+    processingStatus: 'processing',
+    processingErrorCode: '',
+    processingErrorMessage: '',
+    processingStageLabel: 'Preparing your document…',
+    processingFailedStage: '',
+  });
+
+  const pageCount = Math.max(0, Number(opts.pageCount) || 0);
+  const extracted = { text: String(rawText || ''), pages: pageCount };
+  const cleaned = isPdfResource(resource)
+    ? cleanPdfExtractedText(extracted.text)
+    : cleanExtractedText(extracted.text);
+
+  if (!cleaned || cleaned.length < 80) {
+    await fail(
+      resourceId,
+      'NO_TEXT',
+      'Not enough readable text was found in this PDF. Try Word (.docx) or a text-based PDF export.',
+      'prepare',
+    );
+    return;
+  }
+
+  await finalizeResourceIndexing(resourceId, resource, extracted, cleaned);
+};
+
+export const enqueueResourceTextProcessing = (resourceId, rawText, opts = {}) => {
+  const text = String(rawText || '');
+  scheduleBackgroundWork(async () => {
+    try {
+      await processResourceFromClientText(resourceId, text, opts);
+    } catch (err) {
+      logger.error(`[resourceProcessing] Client-text import failed for ${resourceId}: ${err.message}`);
+      await Resource.findByIdAndUpdate(resourceId, {
+        processingStatus: 'failed',
+        processingErrorCode: 'UNEXPECTED',
+        processingErrorMessage: 'Something interrupted processing. Try again or upload a different file.',
+        processingStageLabel: '',
+        processingFailedStage: 'other',
+      }).catch(() => {});
+    }
+  });
+};
+
 export const processResourceDocument = async (resourceId, opts = {}) => {
   const uploadBuffer = opts.fileBuffer?.length ? Buffer.from(opts.fileBuffer) : null;
   const resource = await Resource.findById(resourceId);

@@ -54,7 +54,7 @@ import resultRoutes from './routes/result.js';
 import settingsRoutes from './routes/settings.js';
 import ticketRoutes from './routes/tickets.js';
 import { protect } from './middleware/auth.js';
-import { uploadResourceBytes } from './controllers/resourceController.js';
+import { importResourceText, uploadResourceBytes } from './controllers/resourceController.js';
 
 const app = express();
 
@@ -161,6 +161,8 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/resources',    resourceRoutes);
 app.use('/resources',        resourceRoutes);
 // Explicit POST (Vercel/serverless sometimes misses router sub-routes on cold paths)
+app.post('/api/resources/import-text', protect, importResourceText);
+app.post('/resources/import-text', protect, importResourceText);
 app.post('/api/resources/upload-bytes', protect, uploadResourceBytes);
 app.post('/resources/upload-bytes', protect, uploadResourceBytes);
 app.use('/api/tickets', ticketRoutes);
