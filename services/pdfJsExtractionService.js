@@ -13,6 +13,7 @@ import {
 } from '../utils/pdfExtractionDiagnostics.js';
 import { extractPdfWithPdfParse } from './pdfParseFallbackService.js';
 import { extractPdfWithUnpdf } from './unpdfExtractionService.js';
+import { convertPdfToDocx, isPdfConversionConfigured } from './pdfConversion/pdfConversionService.js';
 
 const require = createRequire(import.meta.url);
 
@@ -336,17 +337,12 @@ export async function extractPdfWithPdfJs(buffer, opts = {}) {
     },
   };
 
-  /** unpdf first everywhere (serverless-safe); pdf-parse + pdfjs as fallbacks. */
+  /** unpdf → pdf-parse → pdfjs (CDN cmaps on Vercel). */
   /** @type {{ name: string, run: () => Promise<{ text: string, pages: number }> }[]} */
   const engines = [
     { name: 'unpdf', run: () => extractPdfWithUnpdf(normalized, { label: label || '' }) },
     { name: 'pdf-parse', run: () => extractPdfWithPdfParse(normalized, { label: label || '' }) },
-    {
-      name: 'pdfjs',
-      run: () => (process.env.VERCEL
-        ? extractTextViaPdfJsMinimal(normalized, pageOpts)
-        : extractTextViaPdfJs(normalized, pageOpts)),
-    },
+    { name: 'pdfjs', run: () => extractTextViaPdfJs(normalized, pageOpts) },
   ];
 
   let result;
@@ -368,6 +364,30 @@ export async function extractPdfWithPdfJs(buffer, opts = {}) {
       errors.push({ engine: name, error: e?.message || String(e) });
       logPdfExtract('engine_failed', { engine: name, label: label || '', error: e?.message || String(e) });
       if (i < engines.length - 1) onStage?.('Trying alternate PDF reader…');
+    }
+  }
+
+  if (!result && isPdfConversionConfigured()) {
+    try {
+      onStage?.('Trying alternate PDF conversion…');
+      logPdfExtract('cloudconvert_start', { label: label || '' });
+      const conv = await convertPdfToDocx({
+        pdfBuffer: normalized,
+        originalFilename: label || 'upload.pdf',
+      });
+      if (conv.ok && conv.docxBuffer?.length) {
+        const mammoth = await import('mammoth');
+        const docxRes = await mammoth.extractRawText({ buffer: conv.docxBuffer });
+        const docxText = (docxRes.value || '').trim();
+        if (docxText.length >= 80) {
+          result = { text: docxText, pages: 1 };
+          logPdfExtract('cloudconvert_ok', { label: label || '', textLen: docxText.length });
+        }
+      } else if (!conv.ok) {
+        logPdfExtract('cloudconvert_skip', { label: label || '', code: conv.code, message: conv.message });
+      }
+    } catch (e) {
+      logPdfExtract('cloudconvert_failed', { label: label || '', error: e?.message || String(e) });
     }
   }
 
