@@ -201,6 +201,7 @@ const healthPayload = () => ({
   mongoReadyState: mongoose.connection.readyState,
   env: process.env.NODE_ENV,
   time: new Date().toISOString(),
+  apiVersion: '2026-05-29-pdf-text',
 });
 
 app.get('/api/health', (req, res) => res.json(healthPayload()));
