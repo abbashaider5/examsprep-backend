@@ -16,7 +16,10 @@ import { protect } from '../middleware/auth.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: RESOURCE_UPLOAD_MAX_BYTES },
+  limits: {
+    fileSize: RESOURCE_UPLOAD_MAX_BYTES,
+    fieldSize: 12 * 1024 * 1024,
+  },
   fileFilter: (_, file, cb) => {
     const allowed = [
       'application/pdf',
@@ -33,36 +36,53 @@ const upload = multer({
 const router = express.Router();
 router.use(protect);
 
-/** Browser PDF text import (query flag survives Vercel proxies reliably). */
-function isBrowserTextImport(req) {
+/** Vercel proxy may mangle ?import=text into ?import-text — accept both. */
+export function wantsPdfTextImport(req) {
   if (req.query.import === 'text') return true;
+  if (Object.prototype.hasOwnProperty.call(req.query, 'import-text')) return true;
   if (req.get('x-resource-import') === 'text') return true;
   if (req.body?.importMode === 'text') return true;
-  const text = req.body?.text;
-  return typeof text === 'string' && text.trim().length > 0;
+  return false;
 }
+
+const parseTextFields = upload.none();
 
 /** Shared POST /api/resources — PDF text fields or multipart file upload. */
 export const handleResourceCreatePost = (req, res, next) => {
-  if (!isBrowserTextImport(req)) {
-    return upload.single('file')(req, res, (err) => {
+  const ct = String(req.headers['content-type'] || '').toLowerCase();
+  const textImport = wantsPdfTextImport(req);
+
+  if (textImport && ct.includes('multipart/form-data')) {
+    return parseTextFields(req, res, (err) => {
       if (err) return next(err);
-      uploadResource(req, res, next);
+      return importResourceText(req, res, next);
     });
   }
 
+  if (textImport) {
+    return importResourceText(req, res, next);
+  }
+
+  return upload.single('file')(req, res, (err) => {
+    if (err) return next(err);
+    uploadResource(req, res, next);
+  });
+};
+
+/** Dedicated path (avoids query-string mangling on Vercel rewrites). */
+export const handleResourceFromTextPost = (req, res, next) => {
   const ct = String(req.headers['content-type'] || '').toLowerCase();
   if (ct.includes('multipart/form-data')) {
-    return upload.none()(req, res, (err) => {
+    return parseTextFields(req, res, (err) => {
       if (err) return next(err);
-      importResourceText(req, res, next);
+      return importResourceText(req, res, next);
     });
   }
-
   return importResourceText(req, res, next);
 };
 
-router.post('/import-text', importResourceText);
+router.post('/from-text', handleResourceFromTextPost);
+router.post('/import-text', handleResourceFromTextPost);
 router.post('/upload-bytes', uploadResourceBytes);
 router.get('/admin', getAdminResources);
 router.get('/mine', getMyResources);

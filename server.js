@@ -49,12 +49,12 @@ import logsRoutes from './routes/logs.js';
 import notificationRoutes from './routes/notifications.js';
 import paymentRoutes from './routes/payment.js';
 import profileRoutes from './routes/profile.js';
-import resourceRoutes, { handleResourceCreatePost } from './routes/resources.js';
+import resourceRoutes, { handleResourceCreatePost, handleResourceFromTextPost } from './routes/resources.js';
 import resultRoutes from './routes/result.js';
 import settingsRoutes from './routes/settings.js';
 import ticketRoutes from './routes/tickets.js';
 import { protect } from './middleware/auth.js';
-import { importResourceText, uploadResourceBytes } from './controllers/resourceController.js';
+import { uploadResourceBytes } from './controllers/resourceController.js';
 
 const app = express();
 
@@ -161,11 +161,13 @@ app.use('/api/notifications', notificationRoutes);
 // Explicit POST /api/resources (Vercel serverless — main upload + browser PDF text)
 app.post('/api/resources', protect, handleResourceCreatePost);
 app.post('/resources', protect, handleResourceCreatePost);
+app.post('/api/resources/from-text', protect, handleResourceFromTextPost);
+app.post('/resources/from-text', protect, handleResourceFromTextPost);
 app.use('/api/resources',    resourceRoutes);
 app.use('/resources',        resourceRoutes);
-// Explicit POST (Vercel/serverless sometimes misses router sub-routes on cold paths)
-app.post('/api/resources/import-text', protect, importResourceText);
-app.post('/resources/import-text', protect, importResourceText);
+// Legacy aliases
+app.post('/api/resources/import-text', protect, handleResourceFromTextPost);
+app.post('/resources/import-text', protect, handleResourceFromTextPost);
 app.post('/api/resources/upload-bytes', protect, uploadResourceBytes);
 app.post('/resources/upload-bytes', protect, uploadResourceBytes);
 app.use('/api/tickets', ticketRoutes);
