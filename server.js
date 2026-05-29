@@ -177,6 +177,7 @@ app.use('/feedback', feedbackRoutes);
 app.use('/contact', contactRoutes);
 app.use('/announcements', announcementRoutes);
 app.use('/groups', groupRoutes);
+app.use('/resources', resourceRoutes);
 app.use('/tickets', ticketRoutes);
 app.use('/help', helpRoutes);
 app.use('/enterprise', enterpriseRoutes);
@@ -207,7 +208,8 @@ app.get('*', (req, res, next) => {
     || req.path.startsWith('/logs') || req.path.startsWith('/payments')
     || req.path.startsWith('/instructor') || req.path.startsWith('/feedback')
     || req.path.startsWith('/contact') || req.path.startsWith('/announcements')
-    || req.path.startsWith('/groups')     || req.path.startsWith('/tickets')
+    || req.path.startsWith('/groups')     || req.path.startsWith('/resources')
+    || req.path.startsWith('/tickets')
     || req.path.startsWith('/enterprise')
     || req.path === '/health') {
     return next();
