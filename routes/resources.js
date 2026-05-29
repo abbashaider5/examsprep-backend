@@ -33,9 +33,19 @@ const upload = multer({
 const router = express.Router();
 router.use(protect);
 
+/** Shared POST /api/resources — JSON text (browser PDF) or multipart file. */
+export const handleResourceCreatePost = (req, res, next) => {
+  if (req.is('application/json') && typeof req.body?.text === 'string') {
+    return importResourceText(req, res, next);
+  }
+  upload.single('file')(req, res, (err) => {
+    if (err) return next(err);
+    uploadResource(req, res, next);
+  });
+};
+
 router.post('/import-text', importResourceText);
 router.post('/upload-bytes', uploadResourceBytes);
-router.post('/', upload.single('file'), uploadResource);
 router.get('/admin', getAdminResources);
 router.get('/mine', getMyResources);
 router.get('/group/:groupId', getGroupResources);

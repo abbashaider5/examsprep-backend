@@ -49,7 +49,7 @@ import logsRoutes from './routes/logs.js';
 import notificationRoutes from './routes/notifications.js';
 import paymentRoutes from './routes/payment.js';
 import profileRoutes from './routes/profile.js';
-import resourceRoutes from './routes/resources.js';
+import resourceRoutes, { handleResourceCreatePost } from './routes/resources.js';
 import resultRoutes from './routes/result.js';
 import settingsRoutes from './routes/settings.js';
 import ticketRoutes from './routes/tickets.js';
@@ -158,6 +158,9 @@ app.use('/api/contact', contactRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/groups',        groupRoutes);
 app.use('/api/notifications', notificationRoutes);
+// Explicit POST /api/resources (Vercel serverless — main upload + browser PDF text)
+app.post('/api/resources', protect, handleResourceCreatePost);
+app.post('/resources', protect, handleResourceCreatePost);
 app.use('/api/resources',    resourceRoutes);
 app.use('/resources',        resourceRoutes);
 // Explicit POST (Vercel/serverless sometimes misses router sub-routes on cold paths)
