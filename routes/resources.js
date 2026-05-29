@@ -33,9 +33,20 @@ const upload = multer({
 const router = express.Router();
 router.use(protect);
 
+/** True when the client sent browser-extracted PDF text (not a multipart file). */
+function isBrowserTextImport(req) {
+  if (req.get('x-resource-import') === 'text') return true;
+  if (req.body?.importMode === 'text') return true;
+  const text = req.body?.text;
+  if (typeof text !== 'string' || !text.trim()) return false;
+  const ct = String(req.headers['content-type'] || '').toLowerCase();
+  if (ct.includes('multipart/form-data')) return false;
+  return true;
+}
+
 /** Shared POST /api/resources — JSON text (browser PDF) or multipart file. */
 export const handleResourceCreatePost = (req, res, next) => {
-  if (req.is('application/json') && typeof req.body?.text === 'string') {
+  if (isBrowserTextImport(req)) {
     return importResourceText(req, res, next);
   }
   upload.single('file')(req, res, (err) => {
