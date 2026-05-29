@@ -53,6 +53,8 @@ import resourceRoutes from './routes/resources.js';
 import resultRoutes from './routes/result.js';
 import settingsRoutes from './routes/settings.js';
 import ticketRoutes from './routes/tickets.js';
+import { protect } from './middleware/auth.js';
+import { uploadResourceBytes } from './controllers/resourceController.js';
 
 const app = express();
 
@@ -87,7 +89,7 @@ const corsOptions = createCorsOptions();
 app.use(helmet({ crossOriginEmbedderPolicy: false, contentSecurityPolicy: false }));
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser(process.env.COOKIE_SECRET));
 app.use(mongoSanitize());
@@ -156,6 +158,9 @@ app.use('/api/groups',        groupRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/resources',    resourceRoutes);
 app.use('/resources',        resourceRoutes);
+// Explicit POST (Vercel/serverless sometimes misses router sub-routes on cold paths)
+app.post('/api/resources/upload-bytes', protect, uploadResourceBytes);
+app.post('/resources/upload-bytes', protect, uploadResourceBytes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/help', helpRoutes);
 app.use('/api/enterprise', enterpriseRoutes);
