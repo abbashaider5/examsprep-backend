@@ -1,28 +1,17 @@
 import Enterprise from '../models/Enterprise.js';
-import User, { PLAN_LIMITS } from '../models/User.js';
-import { getBillingCatalogFromSettings } from './billingCatalogService.js';
+import User from '../models/User.js';
+import {
+  effectivePlanType,
+  effectivePlanTypeWithEnterprise,
+  getUserPlanLimits,
+} from './userPlanLimitsService.js';
 import {
   enterpriseSubscriptionIsActive,
   processEnterpriseSubscriptionLifecycle,
   processPersonalSubscriptionLifecycle,
 } from './subscriptionLifecycleService.js';
 
-export function effectivePlanType(user) {
-  if (!user) return 'free';
-  const now = new Date();
-  if (user.instructorTrialEndsAt && user.instructorTrialEndsAt > now) return 'pro';
-  if (user.plan === 'free') return 'free';
-  if (user.planExpiresAt && user.planExpiresAt < now) return 'free';
-  return user.plan;
-}
-
-/** Effective tier for feature gates when org subscription may cover enterprise instructors/principals. */
-export function effectivePlanTypeWithEnterprise(user, ent) {
-  if (user?.enterpriseId && (user.role === 'instructor' || user.role === 'principal') && ent && enterpriseSubscriptionIsActive(ent)) {
-    return 'enterprise';
-  }
-  return effectivePlanType(user);
-}
+export { effectivePlanType, effectivePlanTypeWithEnterprise } from './userPlanLimitsService.js';
 
 export function hasActivePersonalPaidPlan(user) {
   if (!user?.planExpiresAt) return false;
@@ -69,9 +58,8 @@ export async function refreshMonthlyUsageIfNeeded(userId) {
 }
 
 async function planBaseMonthlyExamLimit(user) {
-  const eff = effectivePlanType(user);
-  const catalog = await getBillingCatalogFromSettings();
-  return catalog.planExamLimits[eff] ?? PLAN_LIMITS[eff] ?? 3;
+  const ctx = await getUserPlanLimits(user);
+  return ctx?.limits?.examsPerMonth ?? 3;
 }
 
 /**
@@ -149,25 +137,27 @@ export async function computeExamUsageSnapshotWithEnterprise(user) {
   const fresh = await User.findById(user._id);
   if (!fresh) return null;
   let entExamCap = null;
-  let entQuestionCap = null;
   if (fresh.enterpriseId && (fresh.role === 'instructor' || fresh.role === 'principal')) {
     const ent = await Enterprise.findById(fresh.enterpriseId)
       .select('examsPerTeacherLimit questionsPerExamLimit orgPlanExpiresAt orgTrialEndsAt')
       .lean();
     if (enterpriseSubscriptionIsActive(ent)) {
       entExamCap = ent?.examsPerTeacherLimit ?? null;
-      entQuestionCap = ent?.questionsPerExamLimit ?? null;
     }
   }
   return computeExamUsageSnapshot(fresh._id, entExamCap, { skipLifecycle: true });
 }
 
 export async function getMaxQuestionsForUser(user, enterpriseQuestionsLimit = null) {
-  const eff = effectivePlanType(user);
-  const catalog = await getBillingCatalogFromSettings();
-  const fromCatalog = catalog.planMaxQuestions[eff];
   if (enterpriseQuestionsLimit != null && Number.isFinite(enterpriseQuestionsLimit)) {
     return enterpriseQuestionsLimit;
   }
-  return fromCatalog ?? 20;
+  const ctx = await getUserPlanLimits(user);
+  return ctx?.limits?.questionsPerExam ?? 20;
+}
+
+export async function canUseProctoringForUser(user, enterpriseConfig = null) {
+  if (enterpriseConfig && enterpriseConfig.aiProctoringEnabled === false) return false;
+  const ctx = await getUserPlanLimits(user);
+  return ctx?.features?.aiProctoring === true;
 }

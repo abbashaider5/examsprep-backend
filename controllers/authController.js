@@ -8,15 +8,14 @@ import { AppError } from '../middleware/errorHandler.js';
 import ExamInvite from '../models/ExamInvite.js';
 import Exam from '../models/Exam.js';
 import User from '../models/User.js';
+import Plan from '../models/Plan.js';
 import { createNotificationsForUsers } from './notificationController.js';
 import OTPCode from '../models/OTPCode.js';
 import { getSettings } from '../models/SystemSettings.js';
 import { sendWelcomeEmail, sendOTPEmail, sendSecurityAlertEmail, sendPasswordResetEmail } from '../services/emailService.js';
 import { verifyRecaptchaToken } from '../services/recaptchaService.js';
-import {
-  computeExamUsageSnapshotWithEnterprise,
-  effectivePlanType,
-} from '../services/subscriptionUsageService.js';
+import { computeExamUsageSnapshotWithEnterprise } from '../services/subscriptionUsageService.js';
+import { effectivePlanType, getUserPlanLimits } from '../services/userPlanLimitsService.js';
 import { buildEnterpriseRenewalTimeline } from '../services/subscriptionLifecycleService.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
@@ -495,6 +494,8 @@ const sanitizeUser = (user) => ({
   twoFactorEnabled: !!user.twoFactorEnabled,
   isPublic: user.isPublic,
   plan: user.getEffectivePlan ? user.getEffectivePlan() : (user.plan || 'free'),
+  individualPlanCode: user.individualPlanCode || '',
+  planDisplayName: user.plan === 'free' ? 'Free' : (user.individualPlanCode || user.plan || 'Plan'),
   autoRenew: !!user.autoRenew,
   planExpiresAt: user.planExpiresAt || null,
   planStatus: user.plan === 'free' ? 'free' : (user.planExpiresAt && user.planExpiresAt < new Date() ? 'expired' : 'active'),
@@ -509,11 +510,19 @@ async function buildUserResponse(user, req) {
   }
   const base = sanitizeUser(fresh);
   base.plan = effectivePlanType(fresh);
+  if (base.plan !== 'free') {
+    const planDoc = fresh.individualPlanCode
+      ? await Plan.findOne({ code: fresh.individualPlanCode, audience: 'individual' }).select('name').lean()
+      : null;
+    base.planDisplayName = planDoc?.name || fresh.individualPlanCode || base.planDisplayName || 'Plan';
+  } else {
+    base.planDisplayName = 'Free';
+  }
   let enterprise = null;
   if (fresh.enterpriseId) {
     const ent = await Enterprise.findById(fresh.enterpriseId)
       .select(
-        'name mode address examsPerTeacherLimit questionsPerExamLimit aiProctoringEnabled aiListeningEnabled '
+        'name mode board address examsPerTeacherLimit questionsPerExamLimit aiProctoringEnabled aiListeningEnabled '
         + 'aiResourceProcessingEnabled codingExamsEnabled aiExamGenerationEnabled estimatedMonthlyCost estimatedMonthlyCostManualPaise '
         + 'teacherLimit studentLimit orgPlanActive orgPlanStartedAt orgPlanExpiresAt orgPlanDurationMonths orgTrialEndsAt subscriptionRenewalQueue',
       )
@@ -527,6 +536,7 @@ async function buildUserResponse(user, req) {
         id: ent._id,
         name: ent.name,
         mode: ent.mode,
+        board: ent.board || 'CBSE',
         address: ent.address || {},
         teacherLimit: ent.teacherLimit,
         teacherUsed,
@@ -568,6 +578,16 @@ async function buildUserResponse(user, req) {
   } else {
     base.remaining = 0;
     base.monthlyLimit = 0;
+  }
+
+  const planCtx = await getUserPlanLimits(fresh);
+  if (planCtx) {
+    base.planLimits = planCtx.limits;
+    base.planFeatures = planCtx.features;
+    base.featureList = planCtx.featureList;
+    base.maxQuestionsPerExam = planCtx.limits.questionsPerExam;
+    base.canUseProctoring = planCtx.features.aiProctoring === true;
+    if (planCtx.planName) base.planDisplayName = planCtx.planName;
   }
   base.extraExamCreditsBalance = fresh.extraExamCreditsBalance || 0;
   base.instructorTrialEndsAt = fresh.instructorTrialEndsAt || null;

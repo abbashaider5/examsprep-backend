@@ -33,7 +33,16 @@ const userSchema = new mongoose.Schema({
 
   // Subscription / plan
   plan: { type: String, enum: ['free', 'pro', 'enterprise'], default: 'free' },
+  /** Dynamic catalog plan code for individual/institute subscriptions (e.g. silver/gold/diamond). */
+  individualPlanCode: { type: String, default: '', index: true },
   autoRenew: { type: Boolean, default: false },
+  autoRenewProvider: { type: String, enum: ['', 'razorpay', 'stripe', 'paddle'], default: '' },
+  razorpaySubscriptionId: { type: String, default: '', index: true },
+  subscriptionStatus: { type: String, default: '' },
+  nextBillingDate: { type: Date, default: null },
+  lastBillingDate: { type: Date, default: null },
+  gracePeriodEndsAt: { type: Date, default: null },
+  subscriptionPaymentMethod: { type: String, default: '' },
   planExpiresAt: { type: Date, default: null },
   examsCreatedThisMonth: { type: Number, default: 0 },
   /**

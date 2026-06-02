@@ -11,13 +11,15 @@ import {
   replyToContact,
   updateContactStatus,
 } from '../controllers/contactController.js';
-import { adminListResources, deleteResource, uploadResource } from '../controllers/resourceController.js';
+import { adminListResources, adminUpdateResource, deleteResource, uploadResource } from '../controllers/resourceController.js';
 import {
   createHelpTopic,
   deleteHelpTopic,
   listHelpTopicsAdmin,
   updateHelpTopic,
 } from '../controllers/helpTopicController.js';
+import { getActiveAiHealth, getAiIncidentDetail, getLastAiRequestTrace, listAiIncidents } from '../controllers/aiHealthController.js';
+import { createPlan, deletePlan, listAdminPlans, updatePlan } from '../controllers/planController.js';
 import { protect, requireAdmin } from '../middleware/auth.js';
 import { RESOURCE_UPLOAD_MAX_BYTES } from '../config/uploadLimits.js';
 
@@ -41,6 +43,10 @@ const router = express.Router();
 
 router.use(protect, requireAdmin);
 router.get('/stats', getStats);
+router.get('/ai-health/active', getActiveAiHealth);
+router.get('/ai-health/last-trace', getLastAiRequestTrace);
+router.get('/ai-health/incidents', listAiIncidents);
+router.get('/ai-health/incidents/:id', getAiIncidentDetail);
 router.get('/users', getUsers);
 router.post('/users', createUser);
 router.patch('/users/:id/role', updateUserRole);
@@ -50,6 +56,10 @@ router.delete('/users/:id', deleteUser);
 router.get('/exams/public', getPublicExams);
 router.get('/transactions', getAdminTransactions);
 router.get('/subscriptions', getAdminSubscriptions);
+router.get('/plans', listAdminPlans);
+router.post('/plans', createPlan);
+router.put('/plans/:id', updatePlan);
+router.delete('/plans/:id', deletePlan);
 
 // Contact query management
 router.get('/contacts', getContacts);
@@ -60,6 +70,7 @@ router.delete('/contacts/:id', deleteContact);
 // Resource / Books management (admin uploads)
 router.get('/resources', adminListResources);
 router.post('/resources', upload.single('file'), uploadResource);
+router.patch('/resources/:id', adminUpdateResource);
 router.delete('/resources/:id', deleteResource);
 
 // Help center articles (CRUD)

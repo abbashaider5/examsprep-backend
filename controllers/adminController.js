@@ -1,6 +1,7 @@
 import { AppError } from '../middleware/errorHandler.js';
 import Exam from '../models/Exam.js';
 import Result from '../models/Result.js';
+import Plan from '../models/Plan.js';
 import Subscription from '../models/Subscription.js';
 import { getSettings } from '../models/SystemSettings.js';
 import Transaction from '../models/Transaction.js';
@@ -8,6 +9,7 @@ import User from '../models/User.js';
 import crypto from 'crypto';
 import { log, fromReq } from '../utils/activityLogger.js';
 import { sendAdminProvisionedAccountEmail, sendPlanChangeEmail } from '../services/emailService.js';
+import { getActiveIncidentSummary } from '../services/aiHealthService.js';
 
 export const getStats = async (req, res, next) => {
   try {
@@ -62,6 +64,8 @@ export const getStats = async (req, res, next) => {
       { $sort: { count: -1 } }, { $limit: 5 },
     ]);
 
+    const aiHealth = await getActiveIncidentSummary();
+
     res.json({
       users: userCount,
       instructors: instructorCount,
@@ -74,6 +78,7 @@ export const getStats = async (req, res, next) => {
       examActivity,
       scoreDistribution,
       topSubjects,
+      aiHealth,
     });
   } catch (err) { next(err); }
 };
@@ -210,52 +215,152 @@ export const getAdminSubscriptions = async (req, res, next) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = 25;
-    const filter = req.query.status ? { status: req.query.status } : {};
+    const filter = {};
+    if (req.query.status) filter.status = req.query.status;
+    if (req.query.autoRenew === 'enabled') filter.autoRenewEnabled = true;
+    if (req.query.autoRenew === 'disabled') filter.autoRenewEnabled = { $ne: true };
+    if (req.query.problem === 'failed') {
+      filter.$or = [
+        { status: 'payment_pending' },
+        { status: 'grace_period' },
+        { subscriptionStatus: 'payment_failed' },
+      ];
+    }
     const [subscriptions, total] = await Promise.all([
       Subscription.find(filter).populate('user', 'name email plan planExpiresAt').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit),
       Subscription.countDocuments(filter),
     ]);
-    res.json({ subscriptions, total, page, pages: Math.ceil(total / limit) });
+    const [activeCount, autoRenewEnabledCount, paymentFailedCount, graceUsersCount, cancelledCount] = await Promise.all([
+      Subscription.countDocuments({ status: 'active' }),
+      Subscription.countDocuments({ autoRenewEnabled: true }),
+      Subscription.countDocuments({ subscriptionStatus: 'payment_failed' }),
+      Subscription.countDocuments({ gracePeriodEndsAt: { $gt: new Date() } }),
+      Subscription.countDocuments({ status: 'cancelled' }),
+    ]);
+    res.json({
+      subscriptions,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+      stats: {
+        activeCount,
+        autoRenewEnabledCount,
+        paymentFailedCount,
+        graceUsersCount,
+        cancelledCount,
+      },
+    });
   } catch (err) { next(err); }
 };
 
 export const updateUserPlan = async (req, res, next) => {
   try {
-    const { plan, months = 1 } = req.body;
-    if (!['free', 'pro'].includes(plan)) return next(new AppError('Invalid plan', 400));
+    const { plan, months = 1, customExpiryDate } = req.body;
+    const requested = String(plan || '').trim().toLowerCase();
 
     const user = await User.findById(req.params.id);
     if (!user) return next(new AppError('User not found', 404));
 
     const oldPlan = user.plan;
+    const oldPlanCode = user.individualPlanCode || '';
+    const oldExpiry = user.planExpiresAt || null;
 
-    user.plan = plan;
-    if (plan === 'free') {
+    let dynamicPlan = null;
+    if (requested && requested !== 'free') {
+      dynamicPlan = await Plan.findOne({ code: requested, audience: 'individual' }).lean();
+      if (!dynamicPlan && !['pro', 'enterprise'].includes(requested)) {
+        return next(new AppError('Invalid plan', 400));
+      }
+    }
+
+    const normalizedMonths = [1, 3, 6, 12].includes(Number(months)) ? Number(months) : 1;
+    let computedExpiry = null;
+    if (requested !== 'free') {
+      if (customExpiryDate) {
+        const parsed = new Date(customExpiryDate);
+        if (Number.isNaN(parsed.getTime())) return next(new AppError('Invalid custom expiry date.', 400));
+        computedExpiry = parsed;
+      } else {
+        computedExpiry = new Date();
+        computedExpiry.setMonth(computedExpiry.getMonth() + normalizedMonths);
+      }
+    }
+
+    user.plan = requested === 'free' ? 'free' : 'pro';
+    if (requested === 'free') {
       user.planExpiresAt = null;
+      user.individualPlanCode = '';
       user.extraExamCreditsBalance = 0;
     } else {
-      const expiry = new Date();
-      expiry.setMonth(expiry.getMonth() + Number(months));
-      user.planExpiresAt = expiry;
+      user.planExpiresAt = computedExpiry;
+      user.individualPlanCode = dynamicPlan?.code || (requested === 'pro' ? 'premium' : requested);
     }
     user.examsCreatedThisMonth = 0;
     await user.save({ validateBeforeSave: false });
 
+    if (requested === 'free') {
+      await Subscription.updateMany(
+        { user: user._id, status: { $in: ['active', 'pending', 'payment_pending', 'grace_period'] } },
+        { $set: { status: 'expired', autoRenewEnabled: false } },
+      );
+    } else {
+      await Subscription.findOneAndUpdate(
+        { user: user._id, status: { $in: ['active', 'pending', 'payment_pending', 'grace_period'] } },
+        {
+          user: user._id,
+          plan: 'pro',
+          individualPlanCode: user.individualPlanCode || requested,
+          status: 'active',
+          subscriptionStatus: 'active',
+          autoRenewEnabled: Boolean(user.autoRenew),
+          startDate: new Date(),
+          endDate: user.planExpiresAt,
+          durationMonths: customExpiryDate ? 1 : normalizedMonths,
+          billingCycle: 'multi',
+          amountPaid: 0,
+          provider: 'manual',
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+    }
+
     const settings = await getSettings();
     const planRanks = { free: 0, pro: 1, enterprise: 2 };
-    const isUpgrade = (planRanks[plan] ?? 0) > (planRanks[oldPlan] ?? 0);
+    const newRankKey = requested === 'free' ? 'free' : (requested === 'enterprise' ? 'enterprise' : 'pro');
+    const isUpgrade = (planRanks[newRankKey] ?? 0) > (planRanks[oldPlan] ?? 0);
     const emailAllowed = isUpgrade ? settings.emailPlanUpgradeEnabled : settings.emailPlanDowngradeEnabled;
     if (emailAllowed) {
       sendPlanChangeEmail({
         email: user.email,
         name: user.name,
         oldPlan,
-        newPlan: plan,
+        newPlan: requested,
         changedBy: 'Admin',
       }).catch(() => {});
     }
 
-    await log({ user: req.user, action: 'admin_plan_changed', category: 'admin', metadata: { targetUserId: req.params.id, plan }, ...fromReq(req) });
-    res.json({ message: 'Plan updated', plan: user.plan, planExpiresAt: user.planExpiresAt });
+    await log({
+      user: req.user,
+      action: 'admin_plan_changed',
+      category: 'admin',
+      metadata: {
+        targetUserId: req.params.id,
+        oldPlan,
+        oldPlanCode,
+        oldExpiry,
+        requestedPlan: requested,
+        newPlanCode: user.individualPlanCode,
+        months: customExpiryDate ? null : normalizedMonths,
+        customExpiryDate: customExpiryDate || null,
+        newExpiry: user.planExpiresAt,
+      },
+      ...fromReq(req),
+    });
+    res.json({
+      message: 'Plan updated',
+      previous: { plan: oldPlan, planCode: oldPlanCode, planExpiresAt: oldExpiry },
+      next: { plan: user.plan, planCode: user.individualPlanCode || '', planExpiresAt: user.planExpiresAt },
+      subscriptionStatus: user.subscriptionStatus || '',
+    });
   } catch (err) { next(err); }
 };

@@ -7,6 +7,8 @@ import { enterpriseSubscriptionIsActive } from '../services/subscriptionLifecycl
 import Resource from '../models/Resource.js';
 import ResourceChunk from '../models/ResourceChunk.js';
 import { retrieveGroundingContext } from '../services/resourceRetrievalService.js';
+import { buildCurriculumWebAiOptions } from '../services/curriculumTopicService.js';
+import { formatAiTraceTree, getAiRequestReport, initAiTraceForRequest } from '../services/ai/aiRequestTrace.js';
 import { enqueueResourceProcessing } from '../services/resourceProcessingService.js';
 import Screenshot from '../models/Screenshot.js';
 import User from '../models/User.js';
@@ -35,11 +37,16 @@ import { log, fromReq } from '../utils/activityLogger.js';
 import { cleanExtractedText, cleanOcrExtractedText, cleanPdfExtractedText } from '../services/resourceChunkingService.js';
 import { extractTextFromResourceBuffer } from '../services/resourceTextExtraction.js';
 import {
+  canUseProctoringForUser,
   computeExamUsageSnapshot,
   consumeExamGenerationSlots,
-  effectivePlanTypeWithEnterprise,
   getMaxQuestionsForUser,
 } from '../services/subscriptionUsageService.js';
+import {
+  assertResourceMatchesSchoolExam,
+  resolveAdditionalAiInstructions,
+  resolveExamCurriculumFields,
+} from '../utils/schoolExamContext.js';
 
 const normalizeExtractedForExam = (ex) => {
   const raw = ex?.text || '';
@@ -60,6 +67,24 @@ export const createExam = async (req, res, next) => {
     } = req.body;
     const user = await User.findById(req.user._id);
     if (!user) return next(new AppError('User not found', 401));
+
+    const additionalAiInstructions = resolveAdditionalAiInstructions(req);
+    let examSubject = subject;
+    let examBoard = '';
+    let examClassLevel = '';
+    try {
+      const curriculum = await resolveExamCurriculumFields(req, user, {
+        subject,
+        classLevel: req.body.classLevel,
+        board: req.body.board,
+      });
+      examSubject = curriculum.subject;
+      examBoard = curriculum.board;
+      examClassLevel = curriculum.classLevel;
+    } catch (err) {
+      if (err instanceof AppError) return next(err);
+      throw err;
+    }
 
     const multipleSets = Boolean(req.body.multipleSets);
     let enterpriseConfig = null;
@@ -94,12 +119,8 @@ export const createExam = async (req, res, next) => {
     if (proctored && enterpriseConfig && enterpriseConfig.aiProctoringEnabled === false) {
       return next(new AppError('AI Proctoring is not enabled in your enterprise plan. Please contact your administrator.', 403));
     }
-    if (proctored && !['pro', 'enterprise'].includes(effectivePlanTypeWithEnterprise(user, enterpriseConfig))) {
-      return next(new AppError('AI Proctoring requires a Pro or Enterprise plan.', 403));
-    }
-
-    if (enableCoding && effectivePlanTypeWithEnterprise(user, enterpriseConfig) !== 'enterprise') {
-      return next(new AppError('Coding questions require an Enterprise plan.', 403));
+    if (proctored && !(await canUseProctoringForUser(user, enterpriseConfig))) {
+      return next(new AppError('AI Proctoring is not included in your current plan.', 403));
     }
 
     // Resolve resource-backed generation (RAG) or legacy full-document text
@@ -108,7 +129,7 @@ export const createExam = async (req, res, next) => {
 
     if (resourceId && !(enableCoding || examType === 'coding')) {
       const resource = await Resource.findById(resourceId).select(
-        'cloudinaryUrl cloudinaryPublicId title scope uploadedBy subject processingStatus processingErrorMessage chunkCount mimetype originalName',
+        'cloudinaryUrl cloudinaryPublicId title scope uploadedBy subject board classLevel processingStatus processingErrorMessage chunkCount mimetype originalName',
       );
       if (!resource) {
         return next(new AppError('Resource not found', 404));
@@ -118,6 +139,16 @@ export const createExam = async (req, res, next) => {
         || user.role === 'admin';
       if (!canAccess) {
         return next(new AppError('Not authorized to use this resource', 403));
+      }
+      try {
+        await assertResourceMatchesSchoolExam(resource, {
+          board: examBoard,
+          classLevel: examClassLevel,
+          subject: examSubject,
+        });
+      } catch (err) {
+        if (err instanceof AppError) return next(err);
+        throw err;
       }
 
       const st = resource.processingStatus;
@@ -139,7 +170,7 @@ export const createExam = async (req, res, next) => {
 
       if (indexed && st === 'ready') {
         const { context } = await retrieveGroundingContext(resource._id, {
-          subject: subject || resource.subject || resource.title || 'General',
+          subject: examSubject || resource.subject || resource.title || 'General',
           topics: topics || [],
           maxChars: 16_000,
           topK: 26,
@@ -176,6 +207,12 @@ export const createExam = async (req, res, next) => {
       }
     }
 
+    const curriculumContext = examBoard && examClassLevel
+      ? { board: examBoard, classLevel: examClassLevel, subject: examSubject }
+      : null;
+
+    initAiTraceForRequest();
+
     // Generate questions based on exam type and source
     let questions;
     const splitMixed = (total, pctRaw) => {
@@ -195,6 +232,41 @@ export const createExam = async (req, res, next) => {
 
     const examTypeEff = enableCoding ? 'coding' : examType;
     const RAG_PREFIX = '__RAG__:';
+    let aiGen = { additionalInstructions: additionalAiInstructions, curriculum: curriculumContext || undefined };
+    let generationTopics = topics || [];
+
+    if (
+      curriculumContext
+      && !resourceId
+      && !resolvedContextText
+      && !(enableCoding || examType === 'coding')
+    ) {
+      try {
+        const webOpts = await buildCurriculumWebAiOptions({
+          board: examBoard,
+          classLevel: examClassLevel,
+          subject: examSubject,
+          teacherTopics: topics || [],
+        });
+        if (webOpts) {
+          aiGen = { ...aiGen, curriculumWebMode: webOpts.curriculumWebMode, curriculumTopicGuidance: webOpts.curriculumTopicGuidance };
+          if (webOpts.topics?.length) generationTopics = webOpts.topics;
+        } else {
+          aiGen = {
+            ...aiGen,
+            curriculumWebMode: true,
+            curriculumTopicGuidance: `Assess ${examSubject} concepts for ${examBoard} Class ${examClassLevel}. Do not ask about chapter names, unit titles, or syllabus structure.`,
+          };
+        }
+      } catch (curErr) {
+        logger.warn(`[createExam] Curriculum topic guidance skipped: ${curErr.message}`);
+        aiGen = {
+          ...aiGen,
+          curriculumWebMode: true,
+          curriculumTopicGuidance: `Assess ${examSubject} for ${examBoard} Class ${examClassLevel}. Never generate chapter-identification or syllabus-recall questions.`,
+        };
+      }
+    }
 
     const instructorLike = ['instructor', 'admin', 'principal'].includes(user.role);
     const wantListen = Boolean(req.body.includeListeningQuestions)
@@ -225,33 +297,35 @@ export const createExam = async (req, res, next) => {
     const genQ = listenCount > 0 ? regularTotal : requestedQ;
 
     if (enableCoding || examTypeEff === 'coding') {
-      questions = await generateCodingQuestions({ subject, difficulty, numQuestions: requestedQ, topics });
+      questions = await generateCodingQuestions({ subject: examSubject, difficulty, numQuestions: requestedQ, topics: generationTopics, ...aiGen });
     } else if (resolvedContextText.startsWith(RAG_PREFIX)) {
       const ctx = resolvedContextText.slice(RAG_PREFIX.length);
       questions = await generateGroundedExamQuestions({
         context: ctx,
-        subject,
+        subject: examSubject,
         numQuestions: genQ,
         examType: examTypeEff,
         difficulty,
         mixedMcqPercent,
-        topics: topics || [],
+        topics: generationTopics,
+        ...aiGen,
       });
     } else if (resolvedContextText) {
       questions = await generateQuestionsFromText({
-        text: resolvedContextText, numQuestions: genQ, examType: examTypeEff, difficulty, mixedMcqPercent, topics: topics || [],
+        text: resolvedContextText, numQuestions: genQ, examType: examTypeEff, difficulty, mixedMcqPercent, topics: generationTopics,
+        ...aiGen,
       });
     } else if (examTypeEff === 'descriptive') {
-      questions = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: genQ, topics });
+      questions = await generateDescriptiveQuestions({ subject: examSubject, difficulty, numQuestions: genQ, topics: generationTopics, ...aiGen });
     } else if (examTypeEff === 'mixed') {
       const { mcqCount, descCount } = splitMixed(genQ, mixedMcqPercent);
       const [mcqs, desc] = await Promise.all([
-        mcqCount > 0 ? generateMCQs({ subject, difficulty, numQuestions: mcqCount, topics }) : Promise.resolve([]),
-        descCount > 0 ? generateDescriptiveQuestions({ subject, difficulty, numQuestions: descCount, topics }) : Promise.resolve([]),
+        mcqCount > 0 ? generateMCQs({ subject: examSubject, difficulty, numQuestions: mcqCount, topics: generationTopics, ...aiGen }) : Promise.resolve([]),
+        descCount > 0 ? generateDescriptiveQuestions({ subject: examSubject, difficulty, numQuestions: descCount, topics: generationTopics, ...aiGen }) : Promise.resolve([]),
       ]);
       questions = [...mcqs, ...desc];
     } else {
-      questions = await generateMCQs({ subject, difficulty, numQuestions: genQ, topics });
+      questions = await generateMCQs({ subject: examSubject, difficulty, numQuestions: genQ, topics: generationTopics, ...aiGen });
     }
 
     if (listenCount > 0) {
@@ -272,7 +346,7 @@ export const createExam = async (req, res, next) => {
         }
       }
       const listeningBatch = await generateListeningExamQuestions({
-        subject,
+        subject: examSubject,
         numQuestions: listenCount,
         difficulty,
         topics: topics || [],
@@ -281,6 +355,7 @@ export const createExam = async (req, res, next) => {
         context: ctxRag,
         contextText: groundedListen ? '' : ctxText,
         narrationStyle: listeningNarrationStyle,
+        ...aiGen,
       });
       questions = interleaveListeningEvenly(questions, listeningBatch);
       questions = await synthesizeAndAttachListeningAudio(questions, { accent: listeningVoiceAccent });
@@ -299,7 +374,8 @@ export const createExam = async (req, res, next) => {
     }
 
     const exam = await Exam.create({
-      title, subject, difficulty,
+      title, subject: examSubject, board: examBoard, classLevel: examClassLevel, additionalAiInstructions,
+      difficulty,
       examType: enableCoding ? 'coding' : examType,
       topics: topics || [],
       questions: questionsToStore,
@@ -356,7 +432,14 @@ export const createExam = async (req, res, next) => {
       `analytics:${user._id}`,
     );
 
-    res.status(201).json({ exam });
+    const aiReport = getAiRequestReport();
+    logger.info(`[createExam] AI pipeline trace:\n${formatAiTraceTree(aiReport)}`);
+
+    const payload = { exam };
+    if (user.role === 'admin' || process.env.AI_REQUEST_DEBUG === '1') {
+      payload.aiDebug = { ...aiReport, tree: formatAiTraceTree(aiReport) };
+    }
+    res.status(201).json(payload);
   } catch (err) {
     next(err);
   }
@@ -458,8 +541,16 @@ export const regenerateExam = async (req, res, next) => {
 
     const subject    = req.body.subject    || exam.subject;
     const difficulty = req.body.difficulty || exam.difficulty;
+    const additionalAiInstructions = resolveAdditionalAiInstructions(req, exam);
+    if (req.body.additionalAiInstructions !== undefined) {
+      exam.additionalAiInstructions = additionalAiInstructions;
+    }
+    const curriculumContext = exam.board && exam.classLevel
+      ? { board: exam.board, classLevel: exam.classLevel, subject: exam.subject }
+      : null;
+    let aiGen = { additionalInstructions: additionalAiInstructions, curriculum: curriculumContext || undefined };
     const numQ       = Number(req.body.numQuestions) || exam.questions.length;
-    const topics     = req.body.topics     || exam.topics;
+    let topics     = req.body.topics     || exam.topics;
     const enableCoding = req.body.enableCoding !== undefined ? Boolean(req.body.enableCoding) : exam.enableCoding;
     const examTypeEff = enableCoding ? 'coding' : (exam.examType || 'mcq');
 
@@ -494,10 +585,43 @@ export const regenerateExam = async (req, res, next) => {
     }
     const genQ = listenCount > 0 ? regularTotal : numQ;
 
+    if (
+      curriculumContext
+      && !exam.sourceResource
+      && !(enableCoding || examTypeEff === 'coding')
+    ) {
+      try {
+        const webOpts = await buildCurriculumWebAiOptions({
+          board: exam.board,
+          classLevel: exam.classLevel,
+          subject: exam.subject,
+          teacherTopics: topics || [],
+        });
+        if (webOpts) {
+          aiGen = { ...aiGen, curriculumWebMode: webOpts.curriculumWebMode, curriculumTopicGuidance: webOpts.curriculumTopicGuidance };
+          if (webOpts.topics?.length) topics = webOpts.topics;
+        } else {
+          aiGen = {
+            ...aiGen,
+            curriculumWebMode: true,
+            curriculumTopicGuidance: `Assess ${exam.subject} concepts for ${exam.board} Class ${exam.classLevel}. Do not ask about chapter names, unit titles, or syllabus structure.`,
+          };
+        }
+      } catch (curErr) {
+        logger.warn(`[regenerateExam] Curriculum topic guidance skipped: ${curErr.message}`);
+        aiGen = {
+          ...aiGen,
+          curriculumWebMode: true,
+          curriculumTopicGuidance: `Assess ${exam.subject} for ${exam.board} Class ${exam.classLevel}. Never generate chapter-identification or syllabus-recall questions.`,
+        };
+      }
+    }
+
+    initAiTraceForRequest();
     let questions;
 
     if (enableCoding || examTypeEff === 'coding') {
-      questions = await generateCodingQuestions({ subject, difficulty, numQuestions: numQ, topics });
+      questions = await generateCodingQuestions({ subject, difficulty, numQuestions: numQ, topics, ...aiGen });
     } else if (exam.sourceResource) {
       const resDoc = await Resource.findById(exam.sourceResource).select('processingStatus chunkCount');
       const st = resDoc?.processingStatus;
@@ -527,6 +651,7 @@ export const regenerateExam = async (req, res, next) => {
           difficulty,
           mixedMcqPercent: req.body.mixedMcqPercent ?? 50,
           topics: topics || [],
+          ...aiGen,
         });
       } else {
         /* legacy exam + resource */
@@ -550,10 +675,11 @@ export const regenerateExam = async (req, res, next) => {
           difficulty,
           mixedMcqPercent: req.body.mixedMcqPercent ?? 50,
           topics: topics || [],
+          ...aiGen,
         });
       }
     } else if (examTypeEff === 'descriptive') {
-      questions = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: genQ, topics });
+      questions = await generateDescriptiveQuestions({ subject, difficulty, numQuestions: genQ, topics, ...aiGen });
     } else if (examTypeEff === 'mixed') {
       const pct = req.body.mixedMcqPercent ?? 50;
       let p = Number(pct);
@@ -563,12 +689,12 @@ export const regenerateExam = async (req, res, next) => {
       let descCount = genQ - mcqCount;
       if (genQ <= 1) descCount = genQ - mcqCount;
       const [mcqs, desc] = await Promise.all([
-        mcqCount > 0 ? generateMCQs({ subject, difficulty, numQuestions: mcqCount, topics }) : Promise.resolve([]),
-        descCount > 0 ? generateDescriptiveQuestions({ subject, difficulty, numQuestions: descCount, topics }) : Promise.resolve([]),
+        mcqCount > 0 ? generateMCQs({ subject, difficulty, numQuestions: mcqCount, topics, ...aiGen }) : Promise.resolve([]),
+        descCount > 0 ? generateDescriptiveQuestions({ subject, difficulty, numQuestions: descCount, topics, ...aiGen }) : Promise.resolve([]),
       ]);
       questions = [...mcqs, ...desc];
     } else {
-      questions = await generateMCQs({ subject, difficulty, numQuestions: genQ, topics });
+      questions = await generateMCQs({ subject, difficulty, numQuestions: genQ, topics, ...aiGen });
     }
 
     if (listenCount > 0) {
@@ -608,6 +734,7 @@ export const regenerateExam = async (req, res, next) => {
         context: ctxRag,
         contextText: ctxText,
         narrationStyle: listeningNarrationStyle,
+        ...aiGen,
       });
       questions = interleaveListeningEvenly(questions, listeningBatch);
       questions = await synthesizeAndAttachListeningAudio(questions, { accent: listeningVoiceAccent });
@@ -732,6 +859,10 @@ export const regenerateQuestion = async (req, res, next) => {
         topic: targetQ?.topic,
         contextText: groundedContext || undefined,
         groundedMode,
+        additionalInstructions: resolveAdditionalAiInstructions(req, exam),
+        curriculum: exam.board && exam.classLevel
+          ? { board: exam.board, classLevel: exam.classLevel, subject: exam.subject }
+          : undefined,
       });
 
       exam.questions[index] = newQuestion;
@@ -821,6 +952,10 @@ export const generateQuestionFromTopic = async (req, res, next) => {
       groundedMode,
       extraGuidance: guidance || undefined,
       questionStyle: questionStyle || undefined,
+      additionalInstructions: resolveAdditionalAiInstructions(req, exam),
+      curriculum: exam.board && exam.classLevel
+        ? { board: exam.board, classLevel: exam.classLevel, subject: exam.subject }
+        : undefined,
     });
 
     exam.questions[anchorIndex] = newQuestion;

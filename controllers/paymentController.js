@@ -3,25 +3,18 @@ import Razorpay from 'razorpay';
 
 import { AppError } from '../middleware/errorHandler.js';
 import Enterprise from '../models/Enterprise.js';
-import { getSettings } from '../models/SystemSettings.js';
 import Subscription from '../models/Subscription.js';
+import { getSettings } from '../models/SystemSettings.js';
 import Transaction from '../models/Transaction.js';
 import User from '../models/User.js';
-import { sendPaymentSuccessEmail } from '../services/emailService.js';
+import Plan from '../models/Plan.js';
 import {
   enterpriseTermTotalPaise,
   getBillingCatalogFromSettings,
   subscriptionPayableForMonths,
 } from '../services/billingCatalogService.js';
+import { sendPaymentSuccessEmail } from '../services/emailService.js';
 import { getEnterpriseBillingBreakdown } from '../services/enterpriseBillingService.js';
-import {
-  computeExamUsageSnapshot,
-  computeExamUsageSnapshotWithEnterprise,
-  effectivePlanType,
-  effectivePlanTypeWithEnterprise,
-  getMaxQuestionsForUser,
-  hasActivePaidPlanForCredits,
-} from '../services/subscriptionUsageService.js';
 import {
   addMonthsClamped,
   buildEnterpriseRenewalTimeline,
@@ -30,9 +23,25 @@ import {
   enqueueEnterpriseRenewal,
   enqueuePersonalRenewal,
   enterpriseSubscriptionIsActive,
+  processPersonalSubscriptionLifecycle,
 } from '../services/subscriptionLifecycleService.js';
+import {
+  computeExamUsageSnapshot,
+  computeExamUsageSnapshotWithEnterprise,
+  getMaxQuestionsForUser,
+  hasActivePaidPlanForCredits,
+} from '../services/subscriptionUsageService.js';
+import {
+  effectivePlanType,
+  filterUpgradeEligiblePlans,
+  getUserPlanLimits,
+  resolveAutoPayTargetPlan,
+  resolveBillingPlanContext,
+  resolveCurrentIndividualPlan,
+} from '../services/userPlanLimitsService.js';
 import { fromReq, log } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
+import { createNotificationsForUsers } from './notificationController.js';
 
 /** Per-teacher AI exam usage for organization principals (calendar month). */
 async function buildPrincipalTeacherExamUsage(enterpriseId, entLean) {
@@ -100,6 +109,197 @@ const getEffectivePlanPrices = async () => {
   }
 };
 
+const AUTOPAY_SUPPORTED_PERSONAL_PLAN = 'pro';
+const PLAN_RANK = { free: 0, pro: 1, enterprise: 2 };
+
+const isInstructorLike = (user) => ['instructor', 'admin', 'principal'].includes(user?.role);
+
+function getPersonalPlanMonthlyPrice(settings, plan) {
+  if (plan === 'enterprise') return Math.max(100, Number(settings.planPriceEnterprise || 199900));
+  return Math.max(100, Number(settings.planPricePro || 14900));
+}
+
+function getDurationDiscountPercent(catalog, months) {
+  const row = (catalog?.durations || []).find((d) => Number(d.months) === Number(months));
+  return Math.max(0, Number(row?.discountPercent || 0));
+}
+
+function computePersonalPlanPayablePaise(settings, catalog, plan, months) {
+  const monthly = getPersonalPlanMonthlyPrice(settings, plan);
+  const discountPercent = getDurationDiscountPercent(catalog, months);
+  const listTotalPaise = monthly * months;
+  const payableTotalPaise = Math.max(100, Math.round(listTotalPaise * ((100 - discountPercent) / 100)));
+  return { monthlyPricePaise: monthly, listTotalPaise, discountPercent, payableTotalPaise };
+}
+
+function computeProratedUpgradeCreditPaise({ user, amountPaidPaise, totalCycleDays }) {
+  if (!user?.planExpiresAt || !['pro', 'enterprise'].includes(user.plan)) return 0;
+  const now = new Date();
+  const expiry = new Date(user.planExpiresAt);
+  if (expiry <= now) return 0;
+  const baseAmount = Math.max(0, Number(amountPaidPaise || 0));
+  if (baseAmount < 1) return 0;
+  const normalizedCycleDays = Math.max(1, Math.round(Number(totalCycleDays || 30)));
+  const remainingDays = Math.max(0, Math.ceil((expiry.getTime() - now.getTime()) / 86400000));
+  return Math.max(0, Math.min(baseAmount, Math.round(baseAmount * (remainingDays / normalizedCycleDays))));
+}
+
+async function resolveCurrentPlanProrationBasis(user) {
+  const now = new Date();
+  const activeSub = await Subscription.findOne({
+    user: user._id,
+    plan: user.plan,
+    status: { $in: ['active', 'pending', 'payment_pending', 'grace_period'] },
+  })
+    .select('amountPaid startDate endDate durationMonths')
+    .sort({ endDate: -1, updatedAt: -1 });
+
+  if (activeSub) {
+    const totalDaysByDates = activeSub.startDate && activeSub.endDate
+      ? Math.ceil((new Date(activeSub.endDate).getTime() - new Date(activeSub.startDate).getTime()) / 86400000)
+      : 0;
+    const totalDays = Math.max(1, totalDaysByDates || (Math.max(1, Number(activeSub.durationMonths || 1)) * 30));
+    const remainingDays = user.planExpiresAt
+      ? Math.max(0, Math.ceil((new Date(user.planExpiresAt).getTime() - now.getTime()) / 86400000))
+      : 0;
+    return {
+      amountPaidPaise: Math.max(0, Number(activeSub.amountPaid || 0)),
+      totalCycleDays: totalDays,
+      remainingDays,
+    };
+  }
+
+  const lastPaidTxn = await Transaction.findOne({
+    user: user._id,
+    purchaseType: 'subscription',
+    plan: user.plan,
+    status: 'paid',
+    $or: [{ billingScope: 'personal' }, { billingScope: { $exists: false } }],
+  })
+    .select('amount durationMonths')
+    .sort({ createdAt: -1 });
+
+  if (lastPaidTxn) {
+    const totalDays = Math.max(1, Math.round(Number(lastPaidTxn.durationMonths || 1)) * 30);
+    const remainingDays = user.planExpiresAt
+      ? Math.max(0, Math.ceil((new Date(user.planExpiresAt).getTime() - now.getTime()) / 86400000))
+      : 0;
+    return {
+      amountPaidPaise: Math.max(0, Number(lastPaidTxn.amount || 0)),
+      totalCycleDays: totalDays,
+      remainingDays,
+    };
+  }
+
+  return { amountPaidPaise: 0, totalCycleDays: 30, remainingDays: 0 };
+}
+
+async function ensureRazorpayMonthlyPlan(settings, amountPaise, planKey = 'pro') {
+  const rzp = getRzp();
+  const useEnterprise = planKey === 'enterprise';
+  const useLegacyCache = planKey === 'pro' || planKey === 'enterprise';
+
+  if (useLegacyCache) {
+    const cachedId = useEnterprise
+      ? settings.razorpayAutopayPlanIdEnterpriseMonthly
+      : settings.razorpayAutopayPlanIdProMonthly;
+    const cachedAmt = Number(useEnterprise
+      ? settings.razorpayAutopayPlanAmountEnterpriseMonthly
+      : settings.razorpayAutopayPlanAmountProMonthly || 0);
+    if (cachedId && cachedAmt === amountPaise) return cachedId;
+  }
+
+  const displayName = useEnterprise
+    ? 'Enterprise'
+    : String(planKey || 'premium').replace(/^\w/, (c) => c.toUpperCase());
+
+  const plan = await rzp.plans.create({
+    period: 'monthly',
+    interval: 1,
+    item: {
+      name: `LikhitAI ${displayName} Monthly AutoPay`,
+      amount: amountPaise,
+      currency: 'INR',
+      description: `Recurring monthly ${displayName} subscription`,
+    },
+    notes: { app: 'likhitai', planCode: planKey, billing: 'monthly' },
+  });
+
+  if (useLegacyCache) {
+    if (useEnterprise) {
+      settings.razorpayAutopayPlanIdEnterpriseMonthly = plan.id;
+      settings.razorpayAutopayPlanAmountEnterpriseMonthly = amountPaise;
+      settings.razorpayAutopayPlanCurrencyEnterpriseMonthly = 'INR';
+    } else {
+      settings.razorpayAutopayPlanIdProMonthly = plan.id;
+      settings.razorpayAutopayPlanAmountProMonthly = amountPaise;
+      settings.razorpayAutopayPlanCurrencyProMonthly = 'INR';
+    }
+    await settings.save();
+  }
+  return plan.id;
+}
+
+function getWebhookBody(req) {
+  if (req.rawBody && typeof req.rawBody === 'string') return req.rawBody;
+  try {
+    return JSON.stringify(req.body || {});
+  } catch {
+    return '';
+  }
+}
+
+async function upsertSubscriptionForRecurring({
+  user,
+  plan = 'pro',
+  individualPlanCode = '',
+  amountPaid,
+  durationMonths = 1,
+  startDate,
+  endDate,
+  razorpaySubscriptionId,
+  razorpayPaymentId = '',
+  razorpayOrderId = '',
+  status = 'active',
+  autoRenewEnabled = true,
+  subscriptionStatus = 'active',
+  nextBillingDate = null,
+  lastBillingDate = null,
+  paymentMethod = '',
+  gracePeriodEndsAt = null,
+  latestInvoiceId = '',
+  latestInvoiceUrl = '',
+}) {
+  const sub = await Subscription.findOneAndUpdate(
+    { user: user._id, plan, provider: 'razorpay', razorpaySubscriptionId },
+    {
+      user: user._id,
+      plan,
+      individualPlanCode: individualPlanCode || user.individualPlanCode || '',
+      provider: 'razorpay',
+      status,
+      amountPaid,
+      durationMonths,
+      billingCycle: 'monthly',
+      startDate,
+      endDate,
+      razorpaySubscriptionId,
+      razorpayPaymentId: razorpayPaymentId || undefined,
+      razorpayOrderId: razorpayOrderId || undefined,
+      autoRenewEnabled,
+      subscriptionStatus,
+      nextBillingDate,
+      lastBillingDate,
+      paymentMethod,
+      gracePeriodEndsAt,
+      latestInvoiceId,
+      latestInvoiceUrl,
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  return sub;
+}
+
 /** POST /api/payments/create-order */
 export const createOrder = async (req, res, next) => {
   try {
@@ -160,11 +360,53 @@ export const createOrder = async (req, res, next) => {
         enterpriseRef = ent._id;
         receiptSuffix = `ent_${durationMonths}m`;
       } else {
-        const plan = body.plan === 'pro' ? 'pro' : null;
-        if (!plan) return next(new AppError('Invalid plan', 400));
-        amount = payable;
+        const requestedPlan = String(body.plan || '').trim().toLowerCase();
+        const dynamicPlan = await Plan.findOne({ code: requestedPlan, isActive: true, audience: 'individual' })
+          .select('code pricing')
+          .lean();
+        const plan = requestedPlan === 'enterprise' ? 'enterprise' : 'pro';
+        if (!dynamicPlan && !['pro', 'enterprise'].includes(requestedPlan)) return next(new AppError('Invalid plan', 400));
+        const user = await User.findById(req.user._id).select('plan planExpiresAt autoRenew razorpaySubscriptionId subscriptionStatus');
+        if (user?.autoRenew && user?.razorpaySubscriptionId) {
+          return next(new AppError(
+            'AutoPay is enabled on your account. Disable AutoPay to use manual queued renewals.',
+            409,
+          ));
+        }
+        const settings = await getSettings();
+        const pricing = dynamicPlan
+          ? {
+            payableTotalPaise: Math.max(
+              100,
+              Number(
+                durationMonths === 6
+                  ? (dynamicPlan.pricing?.halfYearlyPricePaise ?? dynamicPlan.pricing?.monthlyPricePaise * 6)
+                  : durationMonths === 3
+                    ? (dynamicPlan.pricing?.quarterlyPricePaise ?? dynamicPlan.pricing?.monthlyPricePaise * 3)
+                    : dynamicPlan.pricing?.monthlyPricePaise,
+              ) || 0,
+            ),
+          }
+          : computePersonalPlanPayablePaise(settings, catalog, plan, durationMonths);
+        amount = pricing.payableTotalPaise;
+        const upgrade = body.upgrade || {};
+        if (
+          PLAN_RANK[plan] > PLAN_RANK[user?.plan || 'free']
+          && Number(upgrade.creditAppliedPaise) > 0
+        ) {
+          const prorationBasis = await resolveCurrentPlanProrationBasis(user);
+          const maxCredit = computeProratedUpgradeCreditPaise({
+            user,
+            amountPaidPaise: prorationBasis.amountPaidPaise,
+            totalCycleDays: prorationBasis.totalCycleDays,
+          });
+          const requestedCredit = Math.max(0, Number(upgrade.creditAppliedPaise || 0));
+          const appliedCredit = Math.min(maxCredit, requestedCredit, amount - 100);
+          amount = Math.max(100, amount - appliedCredit);
+        }
         planField = plan;
         receiptSuffix = `sub_${plan}_${durationMonths}m`;
+        body.individualPlanCode = dynamicPlan?.code || (plan === 'pro' ? 'premium' : '');
       }
     }
 
@@ -191,6 +433,13 @@ export const createOrder = async (req, res, next) => {
         examCreditQuantity: purchaseType === 'exam_credits' ? examCreditQuantity : undefined,
         receipt,
         status: 'created',
+        metadata: purchaseType === 'subscription' && billingScope === 'personal' ? {
+          source: 'manual',
+          targetPlan: planField,
+          individualPlanCode: body?.individualPlanCode || '',
+          requestedDurationMonths: durationMonths,
+          creditAppliedPaise: Math.max(0, Number(body?.upgrade?.creditAppliedPaise || 0)),
+        } : null,
       });
     } catch (txnErr) {
       logger.warn('Transaction record creation skipped:', txnErr.message);
@@ -208,6 +457,105 @@ export const createOrder = async (req, res, next) => {
       examCreditQuantity: purchaseType === 'exam_credits' ? examCreditQuantity : undefined,
     });
   } catch (err) {
+    next(err);
+  }
+};
+
+/** POST /api/payments/create-subscription */
+export const createSubscriptionCheckout = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return next(new AppError('User not found', 404));
+    if (!isInstructorLike(user)) return next(new AppError('AutoPay is available for instructor accounts only.', 403));
+    if (effectivePlanType(user) === 'free') {
+      return next(new AppError('AutoPay requires an active paid plan. Upgrade first, then enable AutoPay.', 403));
+    }
+
+    const { plan: requestedPlan, autoRenewEnabled = true } = req.body || {};
+    const targetPlanDoc = await resolveAutoPayTargetPlan(user, requestedPlan);
+    if (!targetPlanDoc?.pricing?.monthlyPricePaise) {
+      return next(new AppError('Could not resolve your active plan for AutoPay. Contact support.', 400));
+    }
+
+    const planCode = targetPlanDoc.code;
+    const legacyPlan = 'pro';
+    const amount = Math.max(100, Math.round(Number(targetPlanDoc.pricing.monthlyPricePaise) || 0));
+
+    const settings = await getSettings();
+
+    let rzp;
+    try {
+      rzp = getRzp();
+    } catch {
+      return next(new AppError('Payment system is not configured. Please contact support.', 503));
+    }
+
+    const razorpayPlanId = await ensureRazorpayMonthlyPlan(settings, amount, planCode);
+
+    if (user.autoRenew && user.razorpaySubscriptionId) {
+      try {
+        await rzp.subscriptions.cancel(user.razorpaySubscriptionId, { cancel_at_cycle_end: 0 });
+      } catch (e) {
+        logger.warn(`autopay upgrade cancel old failed ${user.razorpaySubscriptionId}: ${e.message}`);
+      }
+    }
+
+    const payload = {
+      plan_id: razorpayPlanId,
+      customer_notify: 1,
+      total_count: 120,
+      quantity: 1,
+      notes: {
+        userId: String(user._id),
+        source: 'likhitai_autopay',
+        individualPlanCode: planCode,
+      },
+    };
+    const subscription = await rzp.subscriptions.create(payload);
+
+    const initialNextBilling = extractNextBillingDateFromRazorpaySub(subscription, user);
+
+    await upsertSubscriptionForRecurring({
+      user,
+      plan: legacyPlan,
+      individualPlanCode: planCode,
+      amountPaid: amount,
+      durationMonths: 1,
+      startDate: new Date(),
+      endDate: user.planExpiresAt && user.planExpiresAt > new Date() ? user.planExpiresAt : new Date(),
+      razorpaySubscriptionId: subscription.id,
+      status: 'pending',
+      autoRenewEnabled: Boolean(autoRenewEnabled),
+      subscriptionStatus: subscription.status || 'created',
+      nextBillingDate: initialNextBilling,
+    });
+
+    user.plan = legacyPlan;
+    user.individualPlanCode = planCode;
+    user.autoRenew = Boolean(autoRenewEnabled);
+    user.autoRenewProvider = 'razorpay';
+    user.razorpaySubscriptionId = subscription.id;
+    user.subscriptionStatus = subscription.status || 'created';
+    user.nextBillingDate = initialNextBilling;
+    await user.save({ validateBeforeSave: false });
+
+    res.json({
+      keyId: process.env.RAZORPAY_KEY_ID,
+      subscriptionId: subscription.id,
+      status: subscription.status,
+      autoRenewEnabled: user.autoRenew,
+      nextBillingDate: initialNextBilling,
+      message: 'Approve mandate to enable automatic monthly renewal.',
+    });
+  } catch (err) {
+    const rzpMsg = err?.error?.description || err?.description || err?.message;
+    logger.error('createSubscriptionCheckout failed:', rzpMsg || err);
+    if (rzpMsg?.includes('not configured') || err?.message?.includes('not configured')) {
+      return next(new AppError('Payment system is not configured. Please contact support.', 503));
+    }
+    if (err?.statusCode) {
+      return next(new AppError(rzpMsg || 'Could not start AutoPay checkout.', 502));
+    }
     next(err);
   }
 };
@@ -376,11 +724,13 @@ async function finalizePaidTransaction(txn, paymentIds) {
       endDate,
       billingCycle: months === 1 ? 'monthly' : 'multi',
       durationMonths: months,
+      individualPlanCode: String(txn?.metadata?.individualPlanCode || user?.individualPlanCode || 'premium'),
     },
     { new: true, upsert: true, setDefaultsOnInsert: true },
   );
 
   user.plan = plan;
+  if (plan === 'pro') user.individualPlanCode = String(txn?.metadata?.individualPlanCode || user.individualPlanCode || 'premium');
   user.planExpiresAt = endDate;
   user.examsCreatedThisMonth = 0;
   user.monthlyExamResetDate = now;
@@ -514,13 +864,524 @@ export const verifyPayment = async (req, res, next) => {
   }
 };
 
+/** POST /api/payments/autopay/enable */
+export const enableAutoRenew = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return next(new AppError('User not found', 404));
+    if (!isInstructorLike(user)) return next(new AppError('Only instructor accounts can enable AutoPay.', 403));
+
+    const subscriptionId = String(req.body?.razorpaySubscriptionId || user.razorpaySubscriptionId || '').trim();
+    if (!subscriptionId) {
+      return next(new AppError('No Razorpay subscription linked. Create AutoPay checkout first.', 400));
+    }
+
+    user.autoRenew = true;
+    user.autoRenewProvider = 'razorpay';
+    user.razorpaySubscriptionId = subscriptionId;
+    await user.save({ validateBeforeSave: false });
+
+    await Subscription.updateMany(
+      { user: user._id, razorpaySubscriptionId: subscriptionId },
+      { $set: { autoRenewEnabled: true } },
+    );
+
+    const synced = await syncRazorpaySubscriptionState(user);
+    const fresh = await User.findById(user._id).select(
+      'nextBillingDate lastBillingDate subscriptionStatus autoRenew subscriptionPaymentMethod',
+    );
+
+    await createNotificationsForUsers([user._id], {
+      type: 'general',
+      title: 'AutoPay enabled',
+      message: fresh?.nextBillingDate
+        ? `Your subscription will renew automatically. Next payment on ${fresh.nextBillingDate.toLocaleDateString('en-IN')}.`
+        : 'Your subscription will renew automatically through Razorpay.',
+      severity: 'success',
+    });
+
+    res.json({
+      success: true,
+      autoRenewEnabled: true,
+      subscriptionId,
+      nextBillingDate: synced?.nextBillingDate || fresh?.nextBillingDate || null,
+      lastBillingDate: synced?.lastBillingDate || fresh?.lastBillingDate || null,
+      subscriptionStatus: synced?.subscriptionStatus || fresh?.subscriptionStatus || '',
+      paymentMethod: fresh?.subscriptionPaymentMethod || '',
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** POST /api/payments/autopay/disable */
+export const disableAutoRenew = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return next(new AppError('User not found', 404));
+    const subscriptionId = String(req.body?.razorpaySubscriptionId || user.razorpaySubscriptionId || '').trim();
+    if (!subscriptionId) {
+      // Backward-compatible recovery path: clear stale local auto-renew state.
+      user.autoRenew = false;
+      user.autoRenewProvider = '';
+      user.subscriptionStatus = user.subscriptionStatus === 'payment_failed' ? 'payment_failed' : 'manual';
+      user.nextBillingDate = null;
+      user.razorpaySubscriptionId = '';
+      await user.save({ validateBeforeSave: false });
+      await Subscription.updateMany(
+        { user: user._id, autoRenewEnabled: true },
+        { $set: { autoRenewEnabled: false, subscriptionStatus: 'manual' } },
+      );
+
+      await createNotificationsForUsers([user._id], {
+        type: 'general',
+        title: 'AutoPay disabled',
+        message: 'AutoPay is now disabled for your account.',
+        severity: 'info',
+      });
+      return res.json({
+        success: true,
+        autoRenewEnabled: false,
+        recovered: true,
+        message: 'AutoPay was disabled and stale subscription linkage was cleaned up.',
+      });
+    }
+
+    const rzp = getRzp();
+    try {
+      await rzp.subscriptions.cancel(subscriptionId, { cancel_at_cycle_end: 1 });
+    } catch (e) {
+      logger.warn(`disableAutoRenew cancel failed ${subscriptionId}: ${e.message}`);
+    }
+
+    user.autoRenew = false;
+    user.autoRenewProvider = '';
+    user.razorpaySubscriptionId = '';
+    user.nextBillingDate = null;
+    user.subscriptionStatus = 'cancel_at_cycle_end';
+    await user.save({ validateBeforeSave: false });
+    await Subscription.updateMany(
+      { user: user._id, razorpaySubscriptionId: subscriptionId },
+      { $set: { autoRenewEnabled: false, subscriptionStatus: 'cancel_at_cycle_end' } },
+    );
+
+    await createNotificationsForUsers([user._id], {
+      type: 'general',
+      title: 'AutoPay disabled',
+      message: 'Future recurring charges are cancelled. Your current plan remains active until expiry.',
+      severity: 'info',
+    });
+
+    res.json({ success: true, autoRenewEnabled: false, cancelledAtCycleEnd: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** POST /api/payments/autopay/cancel */
+export const cancelAutoRenew = disableAutoRenew;
+
+/** GET /api/payments/autopay/management */
+export const getSubscriptionManagementPortal = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id).select('razorpaySubscriptionId autoRenew');
+    if (!user?.razorpaySubscriptionId) return res.json({ manageUrl: null });
+    // Razorpay supports customer-facing links via dashboard integrations; keep a direct subscription hint.
+    const dashboardUrl = `https://dashboard.razorpay.com/app/subscriptions/${user.razorpaySubscriptionId}`;
+    res.json({ manageUrl: dashboardUrl, autoRenewEnabled: user.autoRenew });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** Resolve next charge date from Razorpay subscription payload (fields vary by status). */
+function extractNextBillingDateFromRazorpaySub(rzSub, user) {
+  const epochCandidates = [
+    rzSub?.current_end,
+    rzSub?.charge_at,
+    rzSub?.end_at,
+  ].filter((v) => v != null && Number(v) > 0);
+
+  for (const ts of epochCandidates) {
+    const d = new Date(Number(ts) * 1000);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+
+  if (rzSub?.current_start) {
+    const start = new Date(Number(rzSub.current_start) * 1000);
+    if (!Number.isNaN(start.getTime())) return addMonthsClamped(start, 1);
+  }
+
+  if (user?.planExpiresAt) {
+    const exp = new Date(user.planExpiresAt);
+    if (!Number.isNaN(exp.getTime()) && exp > new Date()) return exp;
+  }
+
+  return null;
+}
+
+async function syncRazorpaySubscriptionState(user, subscriptionDoc) {
+  const subscriptionId = user?.razorpaySubscriptionId || subscriptionDoc?.razorpaySubscriptionId;
+  if (!subscriptionId) return null;
+  let rzp;
+  try {
+    rzp = getRzp();
+  } catch {
+    return null;
+  }
+  try {
+    const rzSub = await rzp.subscriptions.fetch(subscriptionId);
+    const nextBillingDate = extractNextBillingDateFromRazorpaySub(rzSub, user);
+    const lastBillingDate = rzSub?.current_start
+      ? new Date(Number(rzSub.current_start) * 1000)
+      : (user?.lastBillingDate || null);
+    const patch = {
+      subscriptionStatus: rzSub.status || user?.subscriptionStatus || '',
+      nextBillingDate,
+      lastBillingDate: lastBillingDate && !Number.isNaN(lastBillingDate.getTime()) ? lastBillingDate : null,
+    };
+    await User.findByIdAndUpdate(user._id, patch);
+    await Subscription.updateMany(
+      { user: user._id, razorpaySubscriptionId: subscriptionId },
+      { $set: patch },
+    );
+    return patch;
+  } catch (err) {
+    logger.warn(`syncRazorpaySubscriptionState failed ${subscriptionId}: ${err.message}`);
+    return null;
+  }
+}
+
+/** POST /api/payments/upgrade-quote */
+export const getUpgradeQuote = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id).select('plan planExpiresAt autoRenew razorpaySubscriptionId individualPlanCode');
+    if (!user) return next(new AppError('User not found', 404));
+    const targetPlan = String(req.body?.targetPlan || '').trim().toLowerCase();
+    const durationMonths = [1, 3, 6, 12].includes(Number(req.body?.durationMonths)) ? Number(req.body?.durationMonths) : 1;
+    const plans = await Plan.find({ audience: 'individual', isActive: true })
+      .select('code name pricing sortOrder')
+      .sort({ sortOrder: 1, createdAt: -1 })
+      .lean();
+    const current = await resolveCurrentIndividualPlan(user, plans);
+    const target = plans.find((p) => p.code === targetPlan);
+    if (!target) return next(new AppError('Invalid target plan.', 400));
+    if (current?.code && target.code === current.code) {
+      return next(new AppError('You are already on this plan.', 400));
+    }
+    const eligible = filterUpgradeEligiblePlans(plans, current, user);
+    if (!eligible.some((p) => p.code === target.code)) {
+      return next(new AppError('Target plan is not available as an upgrade.', 400));
+    }
+    const currentOrder = current != null ? Number(current.sortOrder ?? 0) : -1;
+    const targetOrder = Number(target.sortOrder ?? 0);
+    const upgrade = targetOrder > currentOrder;
+    const downgrade = targetOrder < currentOrder;
+    const planCostPaise = Math.max(
+      100,
+      Number(
+        durationMonths === 12
+          ? (target.pricing?.yearlyPricePaise ?? target.pricing?.monthlyPricePaise * 12)
+          : durationMonths === 6
+            ? (target.pricing?.halfYearlyPricePaise ?? target.pricing?.monthlyPricePaise * 6)
+            : durationMonths === 3
+              ? (target.pricing?.quarterlyPricePaise ?? target.pricing?.monthlyPricePaise * 3)
+              : target.pricing?.monthlyPricePaise,
+      ) || 0,
+    );
+
+    if (downgrade) {
+      return res.json({
+        allowedImmediate: false,
+        downgradeDeferred: true,
+        message: 'Downgrade applies after current billing period ends.',
+        currentPlan: current?.code || 'free',
+        newPlan: targetPlan,
+      });
+    }
+
+    const prorationBasis = upgrade
+      ? await resolveCurrentPlanProrationBasis(user)
+      : { amountPaidPaise: 0, totalCycleDays: 30, remainingDays: 0 };
+    const proratedCreditPaise = upgrade
+      ? computeProratedUpgradeCreditPaise({
+        user,
+        amountPaidPaise: prorationBasis.amountPaidPaise,
+        totalCycleDays: prorationBasis.totalCycleDays,
+      })
+      : 0;
+    const creditAppliedPaise = Math.min(proratedCreditPaise, Math.max(0, planCostPaise - 100));
+    const payablePaise = Math.max(100, planCostPaise - creditAppliedPaise);
+
+    res.json({
+      allowedImmediate: true,
+      currentPlan: current?.code || 'free',
+      newPlan: targetPlan,
+      durationMonths,
+      currentPlanExpiresAt: user.planExpiresAt || null,
+      currentPlanMonthlyPricePaise: current?.pricing?.monthlyPricePaise || 0,
+      currentPlanAmountPaidPaise: prorationBasis.amountPaidPaise,
+      remainingDays: prorationBasis.remainingDays,
+      totalCycleDays: prorationBasis.totalCycleDays,
+      planCostPaise,
+      proratedCreditPaise,
+      creditAppliedPaise,
+      payablePaise,
+      autoPayActive: Boolean(user.autoRenew && user.razorpaySubscriptionId),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+async function applyRecurringChargeSuccess({ subscriptionId, paymentId, orderId, invoiceId, amount, method, eventId, raw }) {
+  const subscription = await Subscription.findOne({ razorpaySubscriptionId: subscriptionId }).sort({ createdAt: -1 });
+  if (!subscription) return;
+  const user = await User.findById(subscription.user);
+  if (!user) return;
+
+  // Idempotency guard
+  const existing = await Transaction.findOne({
+    provider: 'razorpay',
+    razorpaySubscriptionId: subscriptionId,
+    razorpayPaymentId: paymentId,
+    status: 'paid',
+  });
+  if (existing) return;
+
+  const now = new Date();
+  const priorEnd = user.planExpiresAt && user.planExpiresAt > now ? user.planExpiresAt : now;
+  const nextEnd = addMonthsClamped(priorEnd, 1);
+  user.plan = 'pro';
+  user.individualPlanCode = subscription.individualPlanCode || user.individualPlanCode || 'premium';
+  user.planExpiresAt = nextEnd;
+  user.examsCreatedThisMonth = 0;
+  user.monthlyExamResetDate = now;
+  user.autoRenew = true;
+  user.autoRenewProvider = 'razorpay';
+  user.razorpaySubscriptionId = subscriptionId;
+  user.subscriptionStatus = 'active';
+  user.lastBillingDate = now;
+  user.nextBillingDate = nextEnd;
+  user.gracePeriodEndsAt = null;
+  user.subscriptionPaymentMethod = method || user.subscriptionPaymentMethod || '';
+  await user.save({ validateBeforeSave: false });
+
+  const tx = await Transaction.create({
+    user: user._id,
+    billingScope: 'personal',
+    subscription: subscription._id,
+    provider: 'razorpay',
+    providerEventId: eventId || '',
+    razorpayOrderId: orderId || `sub_${subscriptionId}_${Date.now()}`,
+    razorpayPaymentId: paymentId || '',
+    razorpaySubscriptionId: subscriptionId,
+    razorpayInvoiceId: invoiceId || '',
+    paymentMethod: method || '',
+    amount: Number(amount) || subscription.amountPaid || 0,
+    currency: 'INR',
+    plan: 'pro',
+    individualPlanCode: subscription.individualPlanCode || user.individualPlanCode || 'premium',
+    purchaseType: 'subscription',
+    durationMonths: 1,
+    status: 'paid',
+    receipt: `autopay_${Date.now()}`,
+    metadata: raw || null,
+  });
+
+  subscription.status = 'active';
+  subscription.autoRenewEnabled = true;
+  subscription.subscriptionStatus = 'active';
+  subscription.lastBillingDate = now;
+  subscription.nextBillingDate = nextEnd;
+  subscription.gracePeriodEndsAt = null;
+  subscription.paymentMethod = method || subscription.paymentMethod || '';
+  subscription.razorpayPaymentId = paymentId || subscription.razorpayPaymentId;
+  subscription.razorpayOrderId = orderId || subscription.razorpayOrderId;
+  subscription.endDate = nextEnd;
+  await subscription.save();
+
+  await createNotificationsForUsers([user._id], {
+    type: 'general',
+    title: 'Renewal successful',
+    message: 'Your AutoPay renewal was successful. Premium access continues without interruption.',
+    severity: 'success',
+    meta: { transactionId: tx._id, subscriptionId },
+  });
+}
+
+async function applyRecurringChargeFailure({ subscriptionId, reason, eventId, raw }) {
+  const subscription = await Subscription.findOne({ razorpaySubscriptionId: subscriptionId }).sort({ createdAt: -1 });
+  if (!subscription) return;
+  const user = await User.findById(subscription.user);
+  if (!user) return;
+
+  const settings = await getSettings();
+  const graceDays = Math.max(1, Number(settings.autopayGraceDays || 7));
+  const now = new Date();
+  const graceEnds = new Date(now.getTime() + graceDays * 24 * 60 * 60 * 1000);
+
+  subscription.status = 'payment_pending';
+  subscription.subscriptionStatus = 'payment_failed';
+  subscription.gracePeriodEndsAt = graceEnds;
+  subscription.latestInvoiceId = subscription.latestInvoiceId || '';
+  await subscription.save();
+
+  user.subscriptionStatus = 'payment_failed';
+  user.gracePeriodEndsAt = graceEnds;
+  await user.save({ validateBeforeSave: false });
+
+  await Transaction.create({
+    user: user._id,
+    billingScope: 'personal',
+    subscription: subscription._id,
+    provider: 'razorpay',
+    providerEventId: eventId || '',
+    razorpayOrderId: `failed_${Date.now()}`,
+    plan: 'pro',
+    purchaseType: 'subscription',
+    durationMonths: 1,
+    amount: subscription.amountPaid || 0,
+    status: 'failed',
+    receipt: `autopay_failed_${Date.now()}`,
+    metadata: raw || { reason },
+  }).catch(() => {});
+
+  await createNotificationsForUsers([user._id], {
+    type: 'general',
+    title: 'AutoPay payment failed',
+    message: `We could not process your recurring payment. Grace period is active until ${graceEnds.toLocaleDateString('en-IN')}.`,
+    severity: 'warning',
+  });
+}
+
+/** POST /api/payments/webhook */
+export const razorpayWebhook = async (req, res) => {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret) return res.status(503).json({ message: 'Webhook secret is not configured' });
+
+  const signature = req.headers['x-razorpay-signature'];
+  const body = getWebhookBody(req);
+  const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
+  if (signature !== expected) {
+    return res.status(400).json({ message: 'Invalid webhook signature' });
+  }
+
+  const event = req.body?.event;
+  const payload = req.body?.payload || {};
+  const eventId = String(req.headers['x-razorpay-event-id'] || req.body?.payload?.payment?.entity?.id || `${req.body?.event || 'evt'}_${Date.now()}`);
+
+  try {
+    if (event === 'subscription.activated') {
+      const subEntity = payload.subscription?.entity || {};
+      const subscriptionId = subEntity.id;
+      if (subscriptionId) {
+        await Subscription.updateMany(
+          { razorpaySubscriptionId: subscriptionId },
+          {
+            $set: {
+              status: 'active',
+              subscriptionStatus: 'active',
+              autoRenewEnabled: true,
+              mandateApprovedAt: new Date(),
+              nextBillingDate: extractNextBillingDateFromRazorpaySub(subEntity, null),
+            },
+          },
+        );
+        const sub = await Subscription.findOne({ razorpaySubscriptionId: subscriptionId }).sort({ createdAt: -1 });
+        if (sub) {
+          const subUser = await User.findById(sub.user);
+          const nextBillingDate = extractNextBillingDateFromRazorpaySub(subEntity, subUser);
+          await User.findByIdAndUpdate(sub.user, {
+            autoRenew: true,
+            autoRenewProvider: 'razorpay',
+            razorpaySubscriptionId: subscriptionId,
+            subscriptionStatus: 'active',
+            nextBillingDate,
+          });
+        }
+      }
+    } else if (event === 'subscription.charged') {
+      const subEntity = payload.subscription?.entity || {};
+      const paymentEntity = payload.payment?.entity || {};
+      const invoiceEntity = payload.invoice?.entity || {};
+      await applyRecurringChargeSuccess({
+        subscriptionId: subEntity.id,
+        paymentId: paymentEntity.id,
+        orderId: paymentEntity.order_id,
+        invoiceId: invoiceEntity.id,
+        amount: paymentEntity.amount,
+        method: paymentEntity.method || '',
+        eventId,
+        raw: req.body,
+      });
+    } else if (event === 'subscription.cancelled' || event === 'subscription.completed') {
+      const subEntity = payload.subscription?.entity || {};
+      const subscriptionId = subEntity.id;
+      if (subscriptionId) {
+        await Subscription.updateMany(
+          { razorpaySubscriptionId: subscriptionId },
+          {
+            $set: {
+              autoRenewEnabled: false,
+              subscriptionStatus: event === 'subscription.completed' ? 'completed' : 'cancelled',
+              status: 'cancelled',
+              cancelledAt: new Date(),
+            },
+          },
+        );
+        const sub = await Subscription.findOne({ razorpaySubscriptionId: subscriptionId }).sort({ createdAt: -1 });
+        if (sub) {
+          await User.findByIdAndUpdate(sub.user, {
+            autoRenew: false,
+            subscriptionStatus: event === 'subscription.completed' ? 'completed' : 'cancelled',
+          });
+        }
+      }
+    } else if (event === 'payment.failed') {
+      const paymentEntity = payload.payment?.entity || {};
+      const subscriptionId = paymentEntity.subscription_id || payload.subscription?.entity?.id || '';
+      if (subscriptionId) {
+        await applyRecurringChargeFailure({
+          subscriptionId,
+          reason: paymentEntity?.error_description || 'Payment failed',
+          eventId,
+          raw: req.body,
+        });
+      }
+    }
+
+    return res.json({ received: true });
+  } catch (err) {
+    logger.error('razorpayWebhook processing failed:', err?.message || err);
+    return res.status(500).json({ message: 'Webhook processing failed' });
+  }
+};
+
 /** GET /api/payments/subscription */
 export const getMySubscription = async (req, res, next) => {
   try {
     const user = await User.findById(req.user._id);
+    const now = new Date();
+    if (
+      user?.subscriptionStatus === 'payment_failed'
+      && user?.gracePeriodEndsAt
+      && user.gracePeriodEndsAt <= now
+      && (!user.planExpiresAt || user.planExpiresAt <= now)
+    ) {
+      user.plan = 'free';
+      user.planExpiresAt = null;
+      user.autoRenew = false;
+      user.subscriptionStatus = 'grace_expired';
+      user.razorpaySubscriptionId = '';
+      await user.save({ validateBeforeSave: false });
+      await processPersonalSubscriptionLifecycle(user._id);
+    }
+
     const snap = await computeExamUsageSnapshotWithEnterprise(user);
     const planUser = snap?.user || user;
     const catalog = await getBillingCatalogFromSettings();
+    const settings = await getSettings();
 
     let enterprisePayload = null;
     let entLean = null;
@@ -590,12 +1451,20 @@ export const getMySubscription = async (req, res, next) => {
       .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
 
     const eff = snap?.effectivePlan ?? effectivePlanType(user);
-    const effWithEnt = effectivePlanTypeWithEnterprise(user, entLean);
 
     const subscription = await Subscription.findOne({
       user: req.user._id,
-      status: { $in: ['active', 'pending'] },
+      status: { $in: ['active', 'pending', 'payment_pending', 'grace_period'] },
     }).sort({ createdAt: -1 });
+
+    if (user?.autoRenew && user?.razorpaySubscriptionId) {
+      const repaired = await syncRazorpaySubscriptionState(user, subscription);
+      if (repaired) {
+        user.nextBillingDate = repaired.nextBillingDate ?? user.nextBillingDate;
+        user.lastBillingDate = repaired.lastBillingDate ?? user.lastBillingDate;
+        user.subscriptionStatus = repaired.subscriptionStatus || user.subscriptionStatus;
+      }
+    }
 
     let entQuestionOverride = null;
     if (user.enterpriseId && (user.role === 'instructor' || user.role === 'principal') && entLean && enterpriseSubscriptionIsActive(entLean)) {
@@ -611,17 +1480,14 @@ export const getMySubscription = async (req, res, next) => {
       purchaseType: 'subscription',
       $or: [{ billingScope: 'personal' }, { billingScope: { $exists: false } }],
     });
-
-    const retailProFeatures = {
-      label: 'Premium (instructor)',
-      monthlyExamLimit: catalog.planExamLimits?.pro ?? 20,
-      maxQuestionsPerExam: catalog.planMaxQuestions?.pro ?? 50,
-      proctoring: true,
-      listeningAudio: true,
-      resourceProcessing: true,
-      codingExams: true,
-      aiGeneration: true,
-    };
+    const planCatalog = await Plan.find({ audience: 'individual', isActive: true })
+      .select('code name description pricing limits features featureSettings highlightedFeatures billing isRecommended isActive sortOrder')
+      .sort({ sortOrder: 1, isRecommended: -1, createdAt: -1 })
+      .lean();
+    const billingCtx = await resolveBillingPlanContext(user, planCatalog);
+    const currentIndividualPlan = billingCtx.currentPlan;
+    const planLimitsCtx = billingCtx.limitsCtx;
+    const upgradeEligiblePlans = billingCtx.upgradeEligiblePlans;
 
     res.json({
       plan: eff,
@@ -635,14 +1501,33 @@ export const getMySubscription = async (req, res, next) => {
       extraExamCreditsBalance: planUser.extraExamCreditsBalance || 0,
       remaining: snap?.remaining ?? 0,
       maxQuestions,
-      canUseProctoring: ['pro', 'enterprise'].includes(effWithEnt),
+      canUseProctoring: planLimitsCtx?.features?.aiProctoring === true,
+      planLimits: planLimitsCtx?.limits || null,
+      planFeatures: planLimitsCtx?.features || null,
+      featureList: planLimitsCtx?.featureList || [],
+      planStatus: planLimitsCtx?.status || 'free',
+      planDisplayName: billingCtx.currentPlanName || planLimitsCtx?.planName || 'Free',
+      currentPlanCode: billingCtx.currentPlanCode || '',
+      currentPlanSortOrder: billingCtx.currentSortOrder,
+      upgradeEligiblePlans,
       managedByOrganization,
       enterprise: enterprisePayload,
       personalRenewalQueue: personalQueue,
       personalRenewalTimeline,
       paidPersonalSubscriptionCount,
-      retailProFeatures,
       subscription,
+      autoRenew: {
+        enabled: Boolean(user.autoRenew),
+        provider: user.autoRenewProvider || (subscription?.provider || ''),
+        razorpaySubscriptionId: user.razorpaySubscriptionId || subscription?.razorpaySubscriptionId || '',
+        subscriptionStatus: user.subscriptionStatus || subscription?.subscriptionStatus || '',
+        nextBillingDate: user.nextBillingDate || subscription?.nextBillingDate || null,
+        lastBillingDate: user.lastBillingDate || subscription?.lastBillingDate || null,
+        paymentMethod: user.subscriptionPaymentMethod || subscription?.paymentMethod || '',
+        gracePeriodEndsAt: user.gracePeriodEndsAt || subscription?.gracePeriodEndsAt || null,
+      },
+      currentIndividualPlan,
+      availableIndividualPlans: planCatalog,
       pricingCatalog: {
         additionalExamCreditPricePaise: catalog.additionalExamCreditPricePaise,
         referPriceMonthlyPaise: catalog.referPriceMonthlyPaise,
@@ -650,6 +1535,8 @@ export const getMySubscription = async (req, res, next) => {
         enterpriseRenewalDurations: catalog.enterpriseRenewalDurations,
         planExamLimits: catalog.planExamLimits,
         planMaxQuestions: catalog.planMaxQuestions,
+        planPricePro: settings.planPricePro || 14900,
+        planPriceEnterprise: settings.planPriceEnterprise || 199900,
       },
     });
   } catch (err) {
