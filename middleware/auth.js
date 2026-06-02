@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import { patchRequestContext } from '../utils/requestContext.js';
 
 export const protect = async (req, res, next) => {
   try {
@@ -26,6 +27,11 @@ export const protect = async (req, res, next) => {
     req.user = effectiveUser;
     req.sessionUser = sessionUser;
     req.isImpersonating = Boolean(impersonatorId);
+    patchRequestContext({
+      userId: String(effectiveUser._id),
+      userEmail: effectiveUser.email,
+      userName: effectiveUser.name,
+    });
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {

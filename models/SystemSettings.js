@@ -52,6 +52,7 @@ const systemSettingsSchema = new mongoose.Schema({
 
   // Plan Pricing (in paise)
   planPricePro: { type: Number, default: 14900 },
+  planPriceEnterprise: { type: Number, default: 199900 },
   /** Marketing reference “list” price per month (INR paise), e.g. ₹999 — used for savings UI. */
   referPriceMonthlyInrPaise: { type: Number, default: 99900 },
   /** Add-on AI exam credits (INR paise each); change without deploy. */
@@ -72,6 +73,15 @@ const systemSettingsSchema = new mongoose.Schema({
   enterpriseCostPerExam: { type: Number, default: 300 },
   enterpriseCostPerQuestion: { type: Number, default: 20 },
   enterpriseCostAiProctoring: { type: Number, default: 5000 },
+
+  // AutoPay / recurring billing
+  autopayGraceDays: { type: Number, default: 7 },
+  razorpayAutopayPlanIdProMonthly: { type: String, default: '' },
+  razorpayAutopayPlanAmountProMonthly: { type: Number, default: 0 },
+  razorpayAutopayPlanCurrencyProMonthly: { type: String, default: 'INR' },
+  razorpayAutopayPlanIdEnterpriseMonthly: { type: String, default: '' },
+  razorpayAutopayPlanAmountEnterpriseMonthly: { type: Number, default: 0 },
+  razorpayAutopayPlanCurrencyEnterpriseMonthly: { type: String, default: 'INR' },
 
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });

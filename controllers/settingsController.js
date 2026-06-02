@@ -21,6 +21,7 @@ export const updateSystemSettings = async (req, res, next) => {
       'certShowQRCode', 'certShowProctoredBadge', 'certShowInstructorName',
       'certPrimaryColor', 'certAccentColor', 'certOrganizationName', 'certFooterText',
       'planPricePro',
+      'planPriceEnterprise',
       'referPriceMonthlyInrPaise',
       'additionalExamCreditPricePaise',
       'examsIncludedFree',
@@ -32,6 +33,9 @@ export const updateSystemSettings = async (req, res, next) => {
       'billingCostBasisInrMonthly',
       'billingPublicNotes',
       'enterpriseCostPerTeacher', 'enterpriseCostPerExam', 'enterpriseCostPerQuestion', 'enterpriseCostAiProctoring',
+      'autopayGraceDays',
+      'razorpayAutopayPlanIdProMonthly', 'razorpayAutopayPlanAmountProMonthly', 'razorpayAutopayPlanCurrencyProMonthly',
+      'razorpayAutopayPlanIdEnterpriseMonthly', 'razorpayAutopayPlanAmountEnterpriseMonthly', 'razorpayAutopayPlanCurrencyEnterpriseMonthly',
     ];
 
     const updates = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowedKeys.includes(k)));

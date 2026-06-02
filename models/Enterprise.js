@@ -12,6 +12,8 @@ const enterpriseSchema = new mongoose.Schema({
   },
   /** school: class/student flows. institute: batch-based (existing). Immutable after create. */
   mode: { type: String, enum: ['school', 'institute'], required: true },
+  /** CBSE or ICSE — required for school workflow; editable by admin. */
+  board: { type: String, enum: ['CBSE', 'ICSE'], default: 'CBSE' },
   teacherLimit: { type: Number, default: 5, min: 1, max: 500 },
   /** Max students (school mode); used for org subscription display & caps. */
   studentLimit: { type: Number, default: 2000, min: 1, max: 500000 },

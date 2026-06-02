@@ -11,6 +11,10 @@ export const DEFAULT_QUESTION_BATCH_SIZE = Math.min(
  */
 export function planQuestionBatches(total, batchSize = DEFAULT_QUESTION_BATCH_SIZE) {
   const n = Math.max(1, Math.floor(Number(total) || 1));
+  const maxSingle = Math.min(30, Math.max(10, Number(process.env.AI_MAX_SINGLE_BATCH_QUESTIONS) || 25));
+  if (n <= maxSingle) {
+    return [n];
+  }
   const size = Math.max(1, Math.floor(batchSize) || DEFAULT_QUESTION_BATCH_SIZE);
   const batches = [];
   let left = n;

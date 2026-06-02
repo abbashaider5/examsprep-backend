@@ -10,6 +10,8 @@ const NOTIFICATION_TYPES = [
   'group_joined',
   'proctoring_violation',
   'batch_joined',
+  'ai_service_alert',
+  'ai_service_restored',
   'general',
 ];
 

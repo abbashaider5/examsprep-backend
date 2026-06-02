@@ -1,6 +1,59 @@
 import logger from '../utils/logger.js';
+import { AI_USER_FACING, isAiRelatedError } from '../constants/aiUserMessages.js';
+import { sanitizeUserFacingText } from '../services/ai/aiProviderErrors.js';
+
+function isPlatformAdmin(req) {
+  return req.user?.role === 'admin';
+}
+
+function buildAdminAiPayload(err) {
+  const d = err.diagnostics || err.aiDiagnostics || null;
+  return {
+    code: err.publicCode || 'AI_SERVICE_UNAVAILABLE',
+    message: err.message,
+    userFacingAi: false,
+    adminOnly: true,
+    aiDiagnostics: d || {
+      errorType: err.name,
+      errorCode: err.publicCode || '',
+      message: err.message,
+      stackTrace: err.stack,
+    },
+  };
+}
 
 export const errorHandler = (err, req, res, next) => {
+  const admin = isPlatformAdmin(req);
+
+  if (isAiRelatedError(err)) {
+    logger.error('[ai] request failure', {
+      userId: req.user?._id,
+      role: req.user?.role,
+      code: err.publicCode,
+      provider: err.diagnostics?.provider,
+      errorType: err.diagnostics?.errorType,
+      errorCode: err.diagnostics?.errorCode,
+      model: err.diagnostics?.model,
+      message: err.diagnostics?.message || err.message,
+      rawResponse: err.diagnostics?.rawResponse,
+      stack: err.stack,
+    });
+
+    const status = err.statusCode || 503;
+
+    if (admin) {
+      return res.status(status).json(buildAdminAiPayload(err));
+    }
+
+    return res.status(status).json({
+      title: AI_USER_FACING.title,
+      message: AI_USER_FACING.message,
+      helperText: AI_USER_FACING.helperText,
+      code: AI_USER_FACING.code,
+      userFacingAi: true,
+    });
+  }
+
   logger.error(err.stack || err.message);
 
   if (err.name === 'ValidationError') {
@@ -27,25 +80,22 @@ export const errorHandler = (err, req, res, next) => {
   }
 
   const status = err.statusCode || 500;
-
-  const AI_USER_MESSAGES = {
-    AI_GENERATION_JSON_FAILED:
-      'LikhitAI could not assemble all of your questions in one pass. Large exams are generated in batches; if this persists, try again with slightly fewer questions.',
-    AI_GENERATION_EMPTY:
-      'LikhitAI did not receive enough questions back from the AI service. Please try again.',
-  };
-
   let message = err.message || 'Internal server error';
-  if (err.supportHint && err.publicCode) {
-    message = AI_USER_MESSAGES[err.publicCode] || message;
-  } else if (status === 500 && process.env.NODE_ENV === 'production') {
-    message = 'Internal server error';
+
+  if (!admin) {
+    message = sanitizeUserFacingText(message);
+    if (!message || status === 500) {
+      message = process.env.NODE_ENV === 'production' ? 'Internal server error' : (err.message || 'Internal server error');
+    }
+    if (status === 500 && process.env.NODE_ENV === 'production' && !message) {
+      message = 'Internal server error';
+    }
+  } else if (status === 500 && process.env.NODE_ENV === 'production' && !err.exposeMessage) {
+    message = err.message || 'Internal server error';
   }
 
   const payload = { message };
-  if (err.publicCode) payload.code = err.publicCode;
-  if (err.supportHint) payload.supportHint = true;
-  if (err.aiKind) payload.aiKind = err.aiKind;
+  if (err.publicCode && admin) payload.code = err.publicCode;
   res.status(status).json(payload);
 };
 

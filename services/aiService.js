@@ -1,5 +1,5 @@
-import Groq from 'groq-sdk';
 import { parseAiJsonArray, parseAiJsonObject } from '../utils/aiJsonParse.js';
+import { aiChatCompletion, getConfiguredChatModel, getConfiguredVisionModel } from './ai/aiRequestClient.js';
 import {
   AiGenerationError,
   maxTokensForCodingBatch,
@@ -15,12 +15,10 @@ import {
   stripSubjectFromQuestion,
   validateAndNormalizeDescriptive,
   validateAndNormalizeMcq,
+  looksLikeSyllabusMetaQuestion,
 } from './questionQualityService.js';
 
 const MAX_SINGLE_REGEN = 4;
-
-let _groq = null;
-const getGroq = () => { if (!_groq) _groq = new Groq({ apiKey: process.env.GROQ_API_KEY }); return _groq; };
 
 const mapMcqRow = (q, subject) => ({
   type: 'mcq',
@@ -55,12 +53,12 @@ const mapCodingRow = (q, subject) => ({
 });
 
 async function requestJsonArray(prompt, maxTokens, kind, requested) {
-  const completion = await getGroq().chat.completions.create({
-    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+  const completion = await aiChatCompletion({
+    model: getConfiguredChatModel(),
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.85,
     max_tokens: maxTokens,
-  });
+  }, { operation: `generate_${kind}` });
   const text = completion.choices[0]?.message?.content?.trim();
   try {
     return parseAiJsonArray(text);
@@ -87,18 +85,26 @@ function batchNoteLine(count, batchIndex, totalBatches) {
 
 async function generateMcqBatchRaw({
   subject, difficulty, topicList, count, focusTopic, priorItems, contextText, resourceMode,
+  additionalInstructions, curriculum, curriculumWebMode, curriculumTopicGuidance,
 }) {
   return runQuestionBatches(count, async (batchCount, { batchIndex, totalBatches, priorItems: batchPrior }) => {
     const combinedPrior = [...priorItems, ...batchPrior];
     const seed = Math.floor(Math.random() * 10000) + batchIndex * 997;
-    const contextSection = contextText
+    const useResourceContext = Boolean(contextText) && !curriculumWebMode;
+    const contextSection = useResourceContext
       ? `\n\nBASE QUESTIONS STRICTLY ON THIS CONTENT:\n"""\n${contextText.slice(0, 6000)}\n"""`
       : '';
     const topicLabel = focusTopic || (topicList[0] || 'General');
+    const topicFieldRule = curriculumWebMode
+      ? `Each question's "topic" field must name the CONCEPT assessed (e.g. "${topicLabel}"), not a chapter or unit title.`
+      : `Each question's "topic" field must be: "${topicLabel}" (or the closest teacher topic label from the list).`;
     const prompt = `You are an expert exam question creator. Generate exactly ${batchCount} UNIQUE multiple choice questions at ${difficulty} difficulty.
 Course context (do NOT repeat this name in question stems): "${subject}"
-${buildQualityPromptRules(subject, { focusTopic, topicList, resourceMode })}${contextSection}${batchNoteLine(batchCount, batchIndex, totalBatches)}${batchAvoidBlock(combinedPrior)}
-Each question's "topic" field must be: "${topicLabel}" (or the closest teacher topic label from the list).
+${buildQualityPromptRules(subject, {
+  focusTopic, topicList, resourceMode, additionalInstructions, curriculum,
+  curriculumWebMode, curriculumTopicGuidance,
+})}${contextSection}${batchNoteLine(batchCount, batchIndex, totalBatches)}${batchAvoidBlock(combinedPrior)}
+${topicFieldRule}
 Batch ID: ${seed}
 
 Return ONLY a valid JSON array, no markdown:
@@ -128,17 +134,27 @@ Rules:
     }
     return questions
       .map((q) => validateAndNormalizeMcq({ ...q, topic: q.topic || topicLabel }, subject))
-      .filter(Boolean);
+      .filter((q) => q && (!curriculumWebMode || !looksLikeSyllabusMetaQuestion(q.question)));
   });
 }
 
-export const generateMCQs = async ({ subject, difficulty, numQuestions, topics, contextText }) => {
+export const generateMCQs = async ({
+  subject, difficulty, numQuestions, topics, contextText, additionalInstructions, curriculum,
+  curriculumWebMode, curriculumTopicGuidance,
+}) => {
   const total = Math.max(1, Math.floor(Number(numQuestions) || 1));
   const topicList = parseTopicList(topics);
+  const webOpts = { curriculumWebMode, curriculumTopicGuidance };
+
+  const genOpts = {
+    singleBatch: true,
+    lightFinalize: Boolean(curriculumWebMode) || topicList.length > 6,
+  };
 
   return orchestrateTopicBasedGeneration({
     numQuestions: total,
     topics: topicList,
+    ...genOpts,
     generateBatch: ({ count, focusTopic, priorItems }) => generateMcqBatchRaw({
       subject,
       difficulty,
@@ -147,16 +163,20 @@ export const generateMCQs = async ({ subject, difficulty, numQuestions, topics, 
       focusTopic,
       priorItems,
       contextText,
-      resourceMode: Boolean(contextText),
+      resourceMode: Boolean(contextText) && !curriculumWebMode,
+      additionalInstructions,
+      curriculum,
+      ...webOpts,
     }),
     finalizeOpts: {
       subject,
       type: 'mcq',
       normalize: (q) => validateAndNormalizeMcq(q, subject),
-      regenerateOne: async ({ focusTopic, priorItems }) => {
+      regenerateOne: genOpts.lightFinalize ? undefined : async ({ focusTopic, priorItems }) => {
         const batch = await generateMcqBatchRaw({
           subject, difficulty, topicList, count: 1, focusTopic, priorItems, contextText,
-          resourceMode: Boolean(contextText),
+          resourceMode: Boolean(contextText) && !curriculumWebMode,
+          additionalInstructions, curriculum, ...webOpts,
         });
         return batch[0] || null;
       },
@@ -174,7 +194,7 @@ function normalizeCodingQuestion(q, subject, focusTopic) {
 }
 
 async function generateCodingBatchRaw({
-  subject, difficulty, topicList, count, focusTopic, priorItems,
+  subject, difficulty, topicList, count, focusTopic, priorItems, additionalInstructions,
 }) {
   return runQuestionBatches(count, async (batchCount, { batchIndex, totalBatches, priorItems: batchPrior }) => {
     const combinedPrior = [...priorItems, ...batchPrior];
@@ -182,7 +202,7 @@ async function generateCodingBatchRaw({
     const topicLabel = focusTopic || (topicList[0] || 'General');
     const prompt = `You are an expert coding interview question creator. Generate exactly ${batchCount} UNIQUE coding challenge(s) at ${difficulty} difficulty.
 Course context (do NOT repeat in problem stems): "${subject}"
-${buildQualityPromptRules(subject, { focusTopic, topicList })}${batchNoteLine(batchCount, batchIndex, totalBatches)}${batchAvoidBlock(combinedPrior)}
+${buildQualityPromptRules(subject, { focusTopic, topicList, additionalInstructions })}${batchNoteLine(batchCount, batchIndex, totalBatches)}${batchAvoidBlock(combinedPrior)}
 Each problem's "topic" field must be: "${topicLabel}".
 Batch ID: ${seed}
 
@@ -204,12 +224,12 @@ Rules:
 - question must include at least one example (input → output)
 - Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
 
-    const completion = await getGroq().chat.completions.create({
-      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    const completion = await aiChatCompletion({
+      model: getConfiguredChatModel(),
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.8,
       max_tokens: maxTokensForCodingBatch(batchCount),
-    });
+    }, { operation: 'coding_batch' });
     const text = completion.choices[0]?.message?.content?.trim();
     let questions;
     try {
@@ -239,23 +259,25 @@ Rules:
 }
 
 /** Generate N coding questions in batched LLM calls for large exams */
-export const generateCodingQuestions = async ({ subject, difficulty, numQuestions, topics }) => {
+export const generateCodingQuestions = async ({ subject, difficulty, numQuestions, topics, additionalInstructions }) => {
   const total = Math.max(1, Math.floor(Number(numQuestions) || 1));
   const topicList = parseTopicList(topics);
 
   return orchestrateTopicBasedGeneration({
     numQuestions: total,
     topics: topicList,
+    singleBatch: true,
+    lightFinalize: topicList.length > 6,
     generateBatch: ({ count, focusTopic, priorItems }) => generateCodingBatchRaw({
-      subject, difficulty, topicList, count, focusTopic, priorItems,
+      subject, difficulty, topicList, count, focusTopic, priorItems, additionalInstructions,
     }),
     finalizeOpts: {
       subject,
       type: 'coding',
       normalize: (q) => normalizeCodingQuestion(q, subject, q.topic),
-      regenerateOne: async ({ focusTopic, priorItems }) => {
+      regenerateOne: topicList.length > 6 ? undefined : async ({ focusTopic, priorItems }) => {
         const batch = await generateCodingBatchRaw({
-          subject, difficulty, topicList, count: 1, focusTopic, priorItems,
+          subject, difficulty, topicList, count: 1, focusTopic, priorItems, additionalInstructions,
         });
         return batch[0] || null;
       },
@@ -304,12 +326,12 @@ Respond ONLY with valid JSON (no other text):
 }`;
 
   try {
-    const completion = await getGroq().chat.completions.create({
-      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    const completion = await aiChatCompletion({
+      model: getConfiguredChatModel(),
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
       max_tokens: 300,
-    });
+    }, { operation: 'evaluate_coding' });
     const text = completion.choices[0]?.message?.content?.trim();
     let result;
     try {
@@ -326,18 +348,26 @@ Respond ONLY with valid JSON (no other text):
 
 async function generateDescriptiveBatchRaw({
   subject, difficulty, topicList, count, focusTopic, priorItems, contextText, resourceMode,
+  additionalInstructions, curriculum, curriculumWebMode, curriculumTopicGuidance,
 }) {
   return runQuestionBatches(count, async (batchCount, { batchIndex, totalBatches, priorItems: batchPrior }) => {
     const combinedPrior = [...priorItems, ...batchPrior];
     const seed = Math.floor(Math.random() * 10000) + batchIndex * 983;
-    const contextSection = contextText
+    const useResourceContext = Boolean(contextText) && !curriculumWebMode;
+    const contextSection = useResourceContext
       ? `\n\nBASE YOUR QUESTIONS STRICTLY ON THIS CONTENT:\n"""\n${contextText.slice(0, 6000)}\n"""`
       : '';
     const topicLabel = focusTopic || (topicList[0] || 'General');
+    const topicFieldRule = curriculumWebMode
+      ? `Each question's "topic" field must name the CONCEPT assessed (e.g. "${topicLabel}"), not a chapter or unit title.`
+      : `Each question's "topic" field must be: "${topicLabel}".`;
     const prompt = `You are an expert exam question creator. Generate exactly ${batchCount} UNIQUE descriptive/open-ended questions at ${difficulty} difficulty.
 Course context (do NOT repeat in question stems): "${subject}"
-${buildQualityPromptRules(subject, { focusTopic, topicList, resourceMode })}${contextSection}${batchNoteLine(batchCount, batchIndex, totalBatches)}${batchAvoidBlock(combinedPrior)}
-Each question's "topic" field must be: "${topicLabel}".
+${buildQualityPromptRules(subject, {
+  focusTopic, topicList, resourceMode, additionalInstructions, curriculum,
+  curriculumWebMode, curriculumTopicGuidance,
+})}${contextSection}${batchNoteLine(batchCount, batchIndex, totalBatches)}${batchAvoidBlock(combinedPrior)}
+${topicFieldRule}
 Batch ID: ${seed}
 
 Return ONLY a valid JSON array, no markdown:
@@ -370,18 +400,26 @@ Inside JSON strings use \\n for line breaks — never raw newline or tab charact
     }
     return questions
       .map((q) => validateAndNormalizeDescriptive({ ...q, topic: q.topic || topicLabel }, subject))
-      .filter(Boolean);
+      .filter((q) => q && (!curriculumWebMode || !looksLikeSyllabusMetaQuestion(q.question)));
   });
 }
 
 /** Generate N descriptive (open-ended) questions */
-export const generateDescriptiveQuestions = async ({ subject, difficulty, numQuestions, topics, contextText }) => {
+export const generateDescriptiveQuestions = async ({
+  subject, difficulty, numQuestions, topics, contextText, additionalInstructions, curriculum,
+  curriculumWebMode, curriculumTopicGuidance,
+}) => {
   const total = Math.max(1, Math.floor(Number(numQuestions) || 1));
   const topicList = parseTopicList(topics);
+  const webOpts = { curriculumWebMode, curriculumTopicGuidance };
+
+  const lightFinalize = Boolean(curriculumWebMode) || topicList.length > 6;
 
   return orchestrateTopicBasedGeneration({
     numQuestions: total,
     topics: topicList,
+    singleBatch: true,
+    lightFinalize,
     generateBatch: ({ count, focusTopic, priorItems }) => generateDescriptiveBatchRaw({
       subject,
       difficulty,
@@ -390,16 +428,20 @@ export const generateDescriptiveQuestions = async ({ subject, difficulty, numQue
       focusTopic,
       priorItems,
       contextText,
-      resourceMode: Boolean(contextText),
+      resourceMode: Boolean(contextText) && !curriculumWebMode,
+      additionalInstructions,
+      curriculum,
+      ...webOpts,
     }),
     finalizeOpts: {
       subject,
       type: 'descriptive',
       normalize: (q) => validateAndNormalizeDescriptive(q, subject),
-      regenerateOne: async ({ focusTopic, priorItems }) => {
+      regenerateOne: lightFinalize ? undefined : async ({ focusTopic, priorItems }) => {
         const batch = await generateDescriptiveBatchRaw({
           subject, difficulty, topicList, count: 1, focusTopic, priorItems, contextText,
-          resourceMode: Boolean(contextText),
+          resourceMode: Boolean(contextText) && !curriculumWebMode,
+          additionalInstructions, curriculum, ...webOpts,
         });
         return batch[0] || null;
       },
@@ -409,7 +451,7 @@ export const generateDescriptiveQuestions = async ({ subject, difficulty, numQue
 
 /** Generate questions from uploaded content text (PDF/doc) — legacy full-document path */
 export const generateQuestionsFromText = async ({
-  text, numQuestions, examType = 'mcq', difficulty = 'medium', mixedMcqPercent = 50, topics = [],
+  text, numQuestions, examType = 'mcq', difficulty = 'medium', mixedMcqPercent = 50, topics = [], additionalInstructions, curriculum,
 }) => {
   const truncated = text.slice(0, 8000);
   const topicList = parseTopicList(topics);
@@ -426,16 +468,16 @@ export const generateQuestionsFromText = async ({
     const [desc, mcqs] = await Promise.all([
       descCount > 0
         ? generateDescriptiveQuestions({
-          subject: 'uploaded content', difficulty, numQuestions: descCount, topics: topicList, contextText: truncated,
+          subject: 'uploaded content', difficulty, numQuestions: descCount, topics: topicList, contextText: truncated, additionalInstructions, curriculum,
         })
         : Promise.resolve([]),
       mcqCount > 0
-        ? generateMCQsFromText({ text: truncated, numQuestions: mcqCount, difficulty, topics: topicList })
+        ? generateMCQsFromText({ text: truncated, numQuestions: mcqCount, difficulty, topics: topicList, additionalInstructions, curriculum })
         : Promise.resolve([]),
     ]);
     return [...mcqs, ...desc];
   }
-  return generateMCQsFromText({ text: truncated, numQuestions, difficulty, topics: topicList });
+  return generateMCQsFromText({ text: truncated, numQuestions, difficulty, topics: topicList, additionalInstructions, curriculum });
 };
 
 const GROUNDED_RULES = `MANDATORY CONSTRAINTS:
@@ -447,7 +489,7 @@ const GROUNDED_RULES = `MANDATORY CONSTRAINTS:
 - Align difficulty with how deeply the snippets support reasoning vs recall.`;
 
 async function generateGroundedMcqBatchRaw({
-  context, subject, difficulty, topicList, count, focusTopic, priorItems, seedBase,
+  context, subject, difficulty, topicList, count, focusTopic, priorItems, seedBase, additionalInstructions, curriculum,
 }) {
   return runQuestionBatches(count, async (batchCount, { batchIndex, totalBatches, priorItems: batchPrior }) => {
     const combinedPrior = [...priorItems, ...batchPrior];
@@ -460,7 +502,7 @@ async function generateGroundedMcqBatchRaw({
 
 ${GROUNDED_RULES}
 ${focusBlock}
-${buildQualityPromptRules(subject, { focusTopic, topicList, resourceMode: true })}
+${buildQualityPromptRules(subject, { focusTopic, topicList, resourceMode: true, additionalInstructions, curriculum })}
 
 Difficulty: ${difficulty}
 Course label (context only, not in stems): "${subject}"
@@ -485,12 +527,12 @@ Return ONLY a valid JSON array with exactly ${batchCount} objects:
 
 Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
 
-    const completion = await getGroq().chat.completions.create({
-      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    const completion = await aiChatCompletion({
+      model: getConfiguredChatModel(),
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.55,
       max_tokens: maxTokensForMcqBatch(batchCount),
-    });
+    }, { operation: 'grounded_mcq' });
     const t = completion.choices[0]?.message?.content?.trim();
     let qs;
     try {
@@ -520,25 +562,29 @@ Inside JSON strings use \\n for line breaks — never raw newline or tab charact
 }
 
 const generateMCQsFromGroundedSnippets = async ({
-  context, subject, numQuestions, difficulty, seed, topics,
+  context, subject, numQuestions, difficulty, seed, topics, additionalInstructions, curriculum,
 }) => {
   const total = Math.max(1, Math.floor(Number(numQuestions) || 1));
   const topicList = parseTopicList(topics);
   const seedBase = seed ?? Math.floor(Math.random() * 10000);
 
+  const lightFinalize = topicList.length > 6;
+
   return orchestrateTopicBasedGeneration({
     numQuestions: total,
     topics: topicList,
+    singleBatch: true,
+    lightFinalize,
     generateBatch: ({ count, focusTopic, priorItems }) => generateGroundedMcqBatchRaw({
-      context, subject, difficulty, topicList, count, focusTopic, priorItems, seedBase,
+      context, subject, difficulty, topicList, count, focusTopic, priorItems, seedBase, additionalInstructions, curriculum,
     }),
     finalizeOpts: {
       subject,
       type: 'mcq',
       normalize: (q) => validateAndNormalizeMcq(q, subject),
-      regenerateOne: async ({ focusTopic, priorItems }) => {
+      regenerateOne: lightFinalize ? undefined : async ({ focusTopic, priorItems }) => {
         const batch = await generateGroundedMcqBatchRaw({
-          context, subject, difficulty, topicList, count: 1, focusTopic, priorItems, seedBase,
+          context, subject, difficulty, topicList, count: 1, focusTopic, priorItems, seedBase, additionalInstructions, curriculum,
         });
         return batch[0] || null;
       },
@@ -547,7 +593,7 @@ const generateMCQsFromGroundedSnippets = async ({
 };
 
 async function generateGroundedDescriptiveBatchRaw({
-  context, subject, difficulty, topicList, count, focusTopic, priorItems, seedBase,
+  context, subject, difficulty, topicList, count, focusTopic, priorItems, seedBase, additionalInstructions, curriculum,
 }) {
   return runQuestionBatches(count, async (batchCount, { batchIndex, totalBatches, priorItems: batchPrior }) => {
     const combinedPrior = [...priorItems, ...batchPrior];
@@ -560,7 +606,7 @@ async function generateGroundedDescriptiveBatchRaw({
 
 ${GROUNDED_RULES}
 ${focusBlock}
-${buildQualityPromptRules(subject, { focusTopic, topicList, resourceMode: true })}
+${buildQualityPromptRules(subject, { focusTopic, topicList, resourceMode: true, additionalInstructions, curriculum })}
 
 Difficulty: ${difficulty}
 Course label (context only, not in stems): "${subject}"
@@ -585,12 +631,12 @@ Return ONLY a valid JSON array with exactly ${batchCount} objects:
 
 Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
 
-    const completion = await getGroq().chat.completions.create({
-      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    const completion = await aiChatCompletion({
+      model: getConfiguredChatModel(),
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.55,
       max_tokens: maxTokensForDescriptiveBatch(batchCount),
-    });
+    }, { operation: 'grounded_descriptive' });
 
     const text = completion.choices[0]?.message?.content?.trim();
     let questions;
@@ -621,25 +667,29 @@ Inside JSON strings use \\n for line breaks — never raw newline or tab charact
 }
 
 const generateDescriptiveFromGroundedSnippets = async ({
-  context, subject, numQuestions, difficulty, topics, seed,
+  context, subject, numQuestions, difficulty, topics, seed, additionalInstructions, curriculum,
 }) => {
   const total = Math.max(1, Math.floor(Number(numQuestions) || 1));
   const topicList = parseTopicList(topics);
   const seedBase = seed ?? Math.floor(Math.random() * 10000);
 
+  const lightFinalize = topicList.length > 6;
+
   return orchestrateTopicBasedGeneration({
     numQuestions: total,
     topics: topicList,
+    singleBatch: true,
+    lightFinalize,
     generateBatch: ({ count, focusTopic, priorItems }) => generateGroundedDescriptiveBatchRaw({
-      context, subject, difficulty, topicList, count, focusTopic, priorItems, seedBase,
+      context, subject, difficulty, topicList, count, focusTopic, priorItems, seedBase, additionalInstructions, curriculum,
     }),
     finalizeOpts: {
       subject,
       type: 'descriptive',
       normalize: (q) => validateAndNormalizeDescriptive(q, subject),
-      regenerateOne: async ({ focusTopic, priorItems }) => {
+      regenerateOne: lightFinalize ? undefined : async ({ focusTopic, priorItems }) => {
         const batch = await generateGroundedDescriptiveBatchRaw({
-          context, subject, difficulty, topicList, count: 1, focusTopic, priorItems, seedBase,
+          context, subject, difficulty, topicList, count: 1, focusTopic, priorItems, seedBase, additionalInstructions, curriculum,
         });
         return batch[0] || null;
       },
@@ -651,7 +701,7 @@ const generateDescriptiveFromGroundedSnippets = async ({
  * RAG-backed generation: `context` must be retrieval-composed snippets only.
  */
 export const generateGroundedExamQuestions = async ({
-  context, subject, numQuestions, examType = 'mcq', difficulty = 'medium', mixedMcqPercent = 50, topics = [],
+  context, subject, numQuestions, examType = 'mcq', difficulty = 'medium', mixedMcqPercent = 50, topics = [], additionalInstructions, curriculum,
 }) => {
   const ctx = (context || '').trim();
   if (ctx.length < 40) throw new Error('Insufficient retrieved material for grounded generation.');
@@ -661,7 +711,7 @@ export const generateGroundedExamQuestions = async ({
 
   if (examType === 'descriptive') {
     return generateDescriptiveFromGroundedSnippets({
-      context: ctx, subject: subj, numQuestions, difficulty, topics, seed,
+      context: ctx, subject: subj, numQuestions, difficulty, topics, seed, additionalInstructions, curriculum,
     });
   }
 
@@ -677,28 +727,32 @@ export const generateGroundedExamQuestions = async ({
     const topicList = parseTopicList(topics);
     const [mcqs, desc] = await Promise.all([
       mcqCount > 0 ? generateMCQsFromGroundedSnippets({
-        context: ctx, subject: subj, numQuestions: mcqCount, difficulty, seed: seed + 1, topics: topicList,
+        context: ctx, subject: subj, numQuestions: mcqCount, difficulty, seed: seed + 1, topics: topicList, additionalInstructions, curriculum,
       }) : Promise.resolve([]),
       descCount > 0 ? generateDescriptiveFromGroundedSnippets({
-        context: ctx, subject: subj, numQuestions: descCount, difficulty, topics: topicList, seed: seed + 2,
+        context: ctx, subject: subj, numQuestions: descCount, difficulty, topics: topicList, seed: seed + 2, additionalInstructions, curriculum,
       }) : Promise.resolve([]),
     ]);
     return [...mcqs, ...desc];
   }
 
   return generateMCQsFromGroundedSnippets({
-    context: ctx, subject: subj, numQuestions, difficulty, seed, topics,
+    context: ctx, subject: subj, numQuestions, difficulty, seed, topics, additionalInstructions, curriculum,
   });
 };
 
-const generateMCQsFromText = async ({ text, numQuestions, difficulty, topics }) => {
+const generateMCQsFromText = async ({ text, numQuestions, difficulty, topics, additionalInstructions, curriculum }) => {
   const total = Math.max(1, Math.floor(Number(numQuestions) || 1));
   const topicList = parseTopicList(topics);
   const subject = 'uploaded content';
 
+  const lightFinalize = topicList.length > 6;
+
   return orchestrateTopicBasedGeneration({
     numQuestions: total,
     topics: topicList,
+    singleBatch: true,
+    lightFinalize,
     generateBatch: ({ count, focusTopic, priorItems }) => generateMcqBatchRaw({
       subject,
       difficulty,
@@ -708,14 +762,16 @@ const generateMCQsFromText = async ({ text, numQuestions, difficulty, topics }) 
       priorItems,
       contextText: text,
       resourceMode: true,
+      additionalInstructions,
+      curriculum,
     }),
     finalizeOpts: {
       subject,
       type: 'mcq',
       normalize: (q) => validateAndNormalizeMcq(q, subject),
-      regenerateOne: async ({ focusTopic, priorItems }) => {
+      regenerateOne: lightFinalize ? undefined : async ({ focusTopic, priorItems }) => {
         const batch = await generateMcqBatchRaw({
-          subject, difficulty, topicList, count: 1, focusTopic, priorItems, contextText: text, resourceMode: true,
+          subject, difficulty, topicList, count: 1, focusTopic, priorItems, contextText: text, resourceMode: true, additionalInstructions, curriculum,
         });
         return batch[0] || null;
       },
@@ -740,6 +796,8 @@ export const generateSingleQuestion = async ({
   groundedMode = false,
   extraGuidance,
   questionStyle,
+  additionalInstructions,
+  curriculum,
 }) => {
   const priorItems = existingQuestions.filter((q) => q?.question);
   const ctxCap = groundedMode ? 14_000 : 3000;
@@ -769,6 +827,7 @@ export const generateSingleQuestion = async ({
         difficulty,
         topics,
         seed: Math.floor(Math.random() * 10000),
+        additionalInstructions,
       }));
     }
     return acceptOrRetry(() => generateDescriptiveQuestions({
@@ -777,12 +836,13 @@ export const generateSingleQuestion = async ({
       numQuestions: 1,
       topics,
       contextText,
+      additionalInstructions,
     }));
   }
 
   if (examType === 'coding') {
     return acceptOrRetry(() => generateCodingQuestions({
-      subject, difficulty, numQuestions: 1, topics,
+      subject, difficulty, numQuestions: 1, topics, additionalInstructions,
     }));
   }
 
@@ -794,6 +854,7 @@ export const generateSingleQuestion = async ({
       difficulty,
       topics,
       seed: Math.floor(Math.random() * 10000),
+      additionalInstructions,
     }));
   }
 
@@ -803,6 +864,7 @@ export const generateSingleQuestion = async ({
       numQuestions: 1,
       difficulty,
       topics,
+      additionalInstructions,
     }));
   }
 
@@ -819,7 +881,7 @@ export const generateSingleQuestion = async ({
   for (let attempt = 0; attempt < MAX_SINGLE_REGEN; attempt += 1) {
     const seed = Math.floor(Math.random() * 10000) + attempt * 503;
     const prompt = `Generate exactly 1 unique MCQ at ${difficulty} difficulty.
-${buildQualityPromptRules(subject, { focusTopic, topicList: topics })}
+${buildQualityPromptRules(subject, { focusTopic, topicList: topics, additionalInstructions, curriculum })}
 ${guideLine}${styleLine}${batchAvoidBlock(priorItems)}
 Batch ID: ${seed}
 
@@ -834,12 +896,12 @@ Return ONLY a single JSON object (not an array):
 
 Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value.`;
 
-    const completion = await getGroq().chat.completions.create({
-      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    const completion = await aiChatCompletion({
+      model: getConfiguredChatModel(),
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.9,
       max_tokens: 512,
-    });
+    }, { operation: 'regenerate_single_mcq' });
 
     const text = completion.choices[0]?.message?.content?.trim();
     let raw;
@@ -856,7 +918,10 @@ Inside JSON strings use \\n for line breaks — never raw newline or tab charact
     if (unique) return unique;
   }
 
-  throw new Error('AI failed to generate a unique replacement question');
+  throw new AiGenerationError('AI failed to generate a unique replacement question', {
+    code: 'AI_GENERATION_EMPTY',
+    kind: 'mcq',
+  });
 };
 
 /** Evaluate a descriptive answer using AI */
@@ -888,12 +953,12 @@ Respond ONLY with valid JSON:
 {"score": <integer 0-100>, "isCorrect": <true if score >= 50>, "feedback": "<1-2 encouraging sentences>"}`;
 
   try {
-    const completion = await getGroq().chat.completions.create({
-      model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    const completion = await aiChatCompletion({
+      model: getConfiguredChatModel(),
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
       max_tokens: 200,
-    });
+    }, { operation: 'evaluate_descriptive', skipHealthRecording: true });
     const text = completion.choices[0]?.message?.content?.trim();
     let result;
     try {
@@ -921,15 +986,14 @@ Suggest:
 
 Return JSON: {"topic": "...", "difficulty": "...", "tip": "..."}`;
 
-  const completion = await getGroq().chat.completions.create({
-    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0.5,
-    max_tokens: 256,
-  });
-
-  const text = completion.choices[0]?.message?.content?.trim();
   try {
+    const completion = await aiChatCompletion({
+      model: getConfiguredChatModel(),
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.5,
+      max_tokens: 256,
+    }, { operation: 'recommendation', skipHealthRecording: true });
+    const text = completion.choices[0]?.message?.content?.trim();
     return parseAiJsonObject(text);
   } catch {
     return null;
@@ -1038,34 +1102,41 @@ Rules:
 - Keep narrationText under 900 characters per item.
 - Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
 
-  const completion = await getGroq().chat.completions.create({
-    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+  const completion = await aiChatCompletion({
+    model: getConfiguredChatModel(),
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.55,
     max_tokens: 4096,
-  });
+  }, { operation: 'listening_grounded' });
 
   const text = completion.choices[0]?.message?.content?.trim();
   let rows;
   try {
     rows = parseAiJsonArray(text);
   } catch {
-    throw new Error('AI failed to generate listening question JSON');
+    throw new AiGenerationError('AI failed to generate listening question JSON', {
+      code: 'AI_GENERATION_JSON_FAILED',
+      kind: 'listening',
+    });
   }
-  if (!Array.isArray(rows) || rows.length === 0) throw new Error('No listening questions generated');
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new AiGenerationError('No listening questions generated', { code: 'AI_GENERATION_EMPTY', kind: 'listening' });
+  }
   return rows.slice(0, numQuestions).map((r) => normalizeListeningQuestion(r, subject, replayLimit));
 };
 
 const generateListeningUngrounded = async ({
-  subject, numQuestions, difficulty, topics, contextText, replayLimit, seed, narrationStyle,
+  subject, numQuestions, difficulty, topics, contextText, replayLimit, seed, narrationStyle, additionalInstructions,
 }) => {
   const topicText = topics?.length ? `Focus on: ${topics.join(', ')}.` : '';
   const ctx = contextText ? `\nOptional reference text (stay consistent if provided):\n"""\n${contextText.slice(0, 6000)}\n"""` : '';
   const styleLine = narrationStyleLine(narrationStyle);
+  const extra = String(additionalInstructions || '').trim().slice(0, 2000);
+  const extraBlock = extra ? `\nADDITIONAL INSTRUCTOR INSTRUCTIONS:\n${extra}\n` : '';
   const prompt = `You are an expert listening-exam author for schools and universities.
 
 ${styleLine}
-
+${extraBlock}
 Create exactly ${numQuestions} UNIQUE listening exercises for "${subject}" at ${difficulty} difficulty. ${topicText}${ctx}
 
 Batch ID: ${seed}
@@ -1093,20 +1164,25 @@ Rules:
 - MCQ must have 4 options.
 - Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
 
-  const completion = await getGroq().chat.completions.create({
-    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+  const completion = await aiChatCompletion({
+    model: getConfiguredChatModel(),
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.75,
     max_tokens: 4096,
-  });
+  }, { operation: 'listening_ungrounded' });
   const text = completion.choices[0]?.message?.content?.trim();
   let rows;
   try {
     rows = parseAiJsonArray(text);
   } catch {
-    throw new Error('AI failed to generate listening question JSON');
+    throw new AiGenerationError('AI failed to generate listening question JSON', {
+      code: 'AI_GENERATION_JSON_FAILED',
+      kind: 'listening',
+    });
   }
-  if (!Array.isArray(rows) || rows.length === 0) throw new Error('No listening questions generated');
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new AiGenerationError('No listening questions generated', { code: 'AI_GENERATION_EMPTY', kind: 'listening' });
+  }
   return rows.slice(0, numQuestions).map((r) => normalizeListeningQuestion(r, subject, replayLimit));
 };
 
@@ -1140,6 +1216,7 @@ export const generateListeningExamQuestions = async (opts) => {
     replayLimit: opts.replayLimit,
     seed,
     narrationStyle,
+    additionalInstructions: opts.additionalInstructions,
   });
 };
 
@@ -1181,29 +1258,30 @@ Return ONLY one JSON object:
 
 Inside JSON strings use \\n for line breaks — never raw newline or tab characters inside a string value`;
 
-  const completion = await getGroq().chat.completions.create({
-    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+  const completion = await aiChatCompletion({
+    model: getConfiguredChatModel(),
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.65,
     max_tokens: 1200,
-  });
+  }, { operation: 'listening_single' });
   const text = completion.choices[0]?.message?.content?.trim();
   let raw;
   try {
     raw = parseAiJsonObject(text);
   } catch {
-    throw new Error('AI failed to generate listening question');
+    throw new AiGenerationError('AI failed to generate listening question', {
+      code: 'AI_GENERATION_JSON_FAILED',
+      kind: 'listening',
+    });
   }
   return normalizeListeningQuestion(raw, subject, replayLimit);
 };
 
 // ── AI Proctoring: analyze a webcam frame for violations ───────────────────
-// Uses Groq vision model to detect faces, phones, laptops, etc.
 export const analyzeProctoringImage = async (base64Image) => {
-  const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
   try {
-    const response = await getGroq().chat.completions.create({
-      model: VISION_MODEL,
+    const response = await aiChatCompletion({
+      model: getConfiguredVisionModel(),
       messages: [{
         role: 'user',
         content: [
@@ -1235,7 +1313,7 @@ Rules:
       }],
       max_tokens: 200,
       temperature: 0,
-    });
+    }, { operation: 'proctoring_vision', skipHealthRecording: true });
 
     const raw = response.choices[0]?.message?.content?.trim() || '';
     let result;

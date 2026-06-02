@@ -10,8 +10,12 @@ const resourceSchema = new mongoose.Schema({
   cloudinaryPublicId:{ type: String, default: '' },    // for deletion
   uploadedBy:        { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   enterpriseId:      { type: mongoose.Schema.Types.ObjectId, ref: 'Enterprise', default: null, index: true },
-  /** Optional subject label for retrieval / exams (teacher-provided) */
+  /** Subject label — curriculum subject for admin resources; optional label for instructor uploads */
   subject:           { type: String, default: '', trim: true },
+  /** CBSE / ICSE — required for scope admin resources */
+  board:             { type: String, enum: ['CBSE', 'ICSE'], default: '' },
+  /** Class 5–12 — required for scope admin resources */
+  classLevel:        { type: String, default: '', trim: true },
   // 'admin' = global resource visible to all instructors
   // 'instructor' = per-group resource uploaded by an instructor
   scope:             { type: String, enum: ['admin', 'instructor'], required: true },
@@ -47,6 +51,7 @@ const resourceSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 resourceSchema.index({ scope: 1 });
+resourceSchema.index({ scope: 1, board: 1, classLevel: 1, subject: 1 });
 resourceSchema.index({ group: 1 });
 resourceSchema.index({ uploadedBy: 1 });
 resourceSchema.index({ processingStatus: 1 });

@@ -23,6 +23,7 @@ import ActivityLog from '../models/ActivityLog.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import { sendEnterprisePrincipalWelcomeEmail, sendEnterpriseTeacherInviteEmail } from '../services/emailService.js';
 import { addMonthsClamped } from '../services/subscriptionLifecycleService.js';
+import { normalizeBoard } from '../constants/curriculum.js';
 
 function canManageSchoolClass(cls, reqUser, ent) {
   if (!cls || !ent) return false;
@@ -119,11 +120,16 @@ export const adminCreateEnterprise = async (req, res, next) => {
       orgTrialDays = 0,
       principalName,
       principalEmail,
+      board: boardBody,
     } = req.body;
 
     if (!name?.trim()) return next(new AppError('Enterprise name is required', 400));
     if (!contactEmail?.trim()) return next(new AppError('Contact email is required', 400));
     if (!['school', 'institute'].includes(mode)) return next(new AppError('Mode must be school or institute', 400));
+    const board = normalizeBoard(boardBody) || 'CBSE';
+    if (boardBody && !normalizeBoard(boardBody)) {
+      return next(new AppError('Board must be CBSE or ICSE', 400));
+    }
     if (!principalName?.trim() || !principalEmail?.trim()) {
       return next(new AppError('Principal name and email are required', 400));
     }
@@ -182,6 +188,7 @@ export const adminCreateEnterprise = async (req, res, next) => {
         zipCode: address.zipCode || '',
       },
       mode,
+      board,
       teacherLimit: lim,
       studentLimit: studentLim,
       examsPerTeacherLimit: examLim,
@@ -322,6 +329,11 @@ export const adminUpdateEnterprise = async (req, res, next) => {
       if (!Number.isNaN(d.getTime())) ent.orgTrialEndsAt = d;
     }
     if (req.body.orgPlanActive !== undefined) ent.orgPlanActive = !!req.body.orgPlanActive;
+    if (req.body.board !== undefined) {
+      const b = normalizeBoard(req.body.board);
+      if (!b) return next(new AppError('Board must be CBSE or ICSE', 400));
+      ent.board = b;
+    }
 
     ent.estimatedMonthlyCost = await computeEnterpriseMonthlyCost({
       teacherLimit: ent.teacherLimit,

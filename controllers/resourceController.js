@@ -17,6 +17,8 @@ import logger from '../utils/logger.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
 import { RESOURCE_UPLOAD_MAX_BYTES } from '../config/uploadLimits.js';
 import { pdfBufferFingerprint } from '../utils/pdfExtractionDiagnostics.js';
+import Enterprise from '../models/Enterprise.js';
+import { BOARDS, CLASS_LEVELS, normalizeBoard, normalizeClassLevel } from '../constants/curriculum.js';
 
 function canUseInstructorResourceApis(user) {
   if (!user) return false;
@@ -56,6 +58,15 @@ async function ingestResourceUpload(req, res, next, input) {
   }
 
   const subject = typeof subjectRaw === 'string' ? subjectRaw.trim().slice(0, 200) : '';
+  let board = '';
+  let classLevel = '';
+  if (isAdmin) {
+    board = normalizeBoard(input.board);
+    classLevel = normalizeClassLevel(input.classLevel);
+    if (!board) return next(new AppError('Board is required (CBSE or ICSE)', 400));
+    if (!classLevel) return next(new AppError('Class is required (5–12)', 400));
+    if (!subject) return next(new AppError('Subject is required', 400));
+  }
   const fileBuffer = Buffer.from(buffer);
 
   if (lowerName.endsWith('.pdf') || (mimetype || '').includes('pdf')) {
@@ -83,6 +94,8 @@ async function ingestResourceUpload(req, res, next, input) {
     uploadedBy: req.user._id,
     enterpriseId: req.user.enterpriseId || null,
     subject,
+    board: isAdmin ? board : '',
+    classLevel: isAdmin ? classLevel : '',
     scope: isAdmin ? 'admin' : 'instructor',
     group: group ? group._id : null,
     processingStatus: 'processing',
@@ -116,7 +129,7 @@ async function ingestResourceUpload(req, res, next, input) {
 export const uploadResource = async (req, res, next) => {
   try {
     if (!req.file) return next(new AppError('No file uploaded', 400));
-    const { title, groupId, subject: subjectRaw } = req.body;
+    const { title, groupId, subject: subjectRaw, board, classLevel } = req.body;
     await ingestResourceUpload(req, res, next, {
       buffer: req.file.buffer,
       originalName: req.file.originalname,
@@ -125,10 +138,33 @@ export const uploadResource = async (req, res, next) => {
       title,
       groupId,
       subject: subjectRaw,
+      board,
+      classLevel,
       uploadChannel: 'multipart',
     });
   } catch (err) { next(err); }
 };
+
+function buildAdminResourceFilter(query) {
+  const filter = { scope: 'admin' };
+  const boardQ = normalizeBoard(query.board);
+  const classQ = normalizeClassLevel(query.classLevel);
+  const subjectQ = typeof query.subject === 'string' ? query.subject.trim() : '';
+
+  if (boardQ) filter.board = boardQ;
+  if (classQ) filter.classLevel = classQ;
+  if (subjectQ) filter.subject = subjectQ;
+
+  return { filter, boardQ, classQ, subjectQ };
+}
+
+async function applySchoolInstructorBoardFilter(filter, user) {
+  if (!user?.enterpriseId) return;
+  const ent = await Enterprise.findById(user.enterpriseId).select('board mode').lean();
+  if (ent?.mode === 'school') {
+    filter.board = ent.board || 'CBSE';
+  }
+}
 
 /** Text extracted in the browser (pdf.js) — uses standard POST /api/resources/import-text. */
 export const importResourceText = async (req, res, next) => {
@@ -255,15 +291,52 @@ export const uploadResourceBytes = async (req, res, next) => {
 export const getAdminResources = async (req, res, next) => {
   try {
     if (!canUseInstructorResourceApis(req.user)) return next(new AppError('Not authorized', 403));
-    const key = 'resources:admin';
-    const cached = await getCache(key);
-    if (cached) return res.json(cached);
+    const { filter, boardQ, classQ, subjectQ } = buildAdminResourceFilter(req.query);
+    await applySchoolInstructorBoardFilter(filter, req.user);
 
-    const resources = await Resource.find({ scope: 'admin' })
-      .sort({ createdAt: -1 });
+    const hasFilters = boardQ || classQ || subjectQ || filter.board;
+    if (!hasFilters) {
+      const key = 'resources:admin';
+      const cached = await getCache(key);
+      if (cached) return res.json(cached);
+    }
+
+    const resources = await Resource.find(filter).sort({ createdAt: -1 });
     const payload = { resources };
-    await setCache(key, payload, 600);
+    if (!hasFilters) await setCache('resources:admin', payload, 600);
     res.json(payload);
+  } catch (err) { next(err); }
+};
+
+/** Distinct class → subjects from admin resources (single source of truth for school exam dropdowns). */
+export const getCurriculumMappings = async (req, res, next) => {
+  try {
+    if (!canUseInstructorResourceApis(req.user) && req.user.role !== 'admin') {
+      return next(new AppError('Not authorized', 403));
+    }
+    let board = normalizeBoard(req.query.board);
+    if (!board && req.user.enterpriseId) {
+      const ent = await Enterprise.findById(req.user.enterpriseId).select('board mode').lean();
+      if (ent?.mode === 'school') board = ent.board || 'CBSE';
+    }
+    if (!board) board = 'CBSE';
+
+    const rows = await Resource.find({ scope: 'admin', board }).select('classLevel subject').lean();
+    /** @type {Record<string, string[]>} */
+    const mappings = {};
+    for (const c of CLASS_LEVELS) mappings[c] = [];
+    for (const r of rows) {
+      const cl = normalizeClassLevel(r.classLevel);
+      const sub = String(r.subject || '').trim();
+      if (!cl || !sub) continue;
+      if (!mappings[cl].some((s) => s.toLowerCase() === sub.toLowerCase())) {
+        mappings[cl].push(sub);
+      }
+    }
+    for (const c of CLASS_LEVELS) {
+      mappings[c].sort((a, b) => a.localeCompare(b));
+    }
+    res.json({ board, mappings, boards: BOARDS, classLevels: CLASS_LEVELS });
   } catch (err) { next(err); }
 };
 
@@ -483,9 +556,43 @@ export const retryResourceProcessing = async (req, res, next) => {
 // ── Admin: list ALL resources ─────────────────────────────────────────────
 export const adminListResources = async (req, res, next) => {
   try {
-    const resources = await Resource.find({ scope: 'admin' })
+    const { filter } = buildAdminResourceFilter(req.query);
+    const resources = await Resource.find(filter)
       .populate('uploadedBy', 'name email role')
       .sort({ createdAt: -1 });
-    res.json({ resources });
+    res.json({ resources, boards: BOARDS, classLevels: CLASS_LEVELS });
+  } catch (err) { next(err); }
+};
+
+export const adminUpdateResource = async (req, res, next) => {
+  try {
+    const resource = await Resource.findById(req.params.id);
+    if (!resource || resource.scope !== 'admin') return next(new AppError('Resource not found', 404));
+
+    if (req.body.title !== undefined) {
+      const t = String(req.body.title || '').trim();
+      if (!t) return next(new AppError('Resource name is required', 400));
+      resource.title = t;
+    }
+    if (req.body.board !== undefined) {
+      const b = normalizeBoard(req.body.board);
+      if (!b) return next(new AppError('Board must be CBSE or ICSE', 400));
+      resource.board = b;
+    }
+    if (req.body.classLevel !== undefined) {
+      const cl = normalizeClassLevel(req.body.classLevel);
+      if (!cl) return next(new AppError('Class must be 5–12', 400));
+      resource.classLevel = cl;
+    }
+    if (req.body.subject !== undefined) {
+      const sub = String(req.body.subject || '').trim().slice(0, 200);
+      if (!sub) return next(new AppError('Subject is required', 400));
+      resource.subject = sub;
+    }
+
+    await resource.save();
+    await delCache('resources:admin');
+    const populated = await Resource.findById(resource._id).populate('uploadedBy', 'name email role');
+    res.json({ resource: populated });
   } catch (err) { next(err); }
 };

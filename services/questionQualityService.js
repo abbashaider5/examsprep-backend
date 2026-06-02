@@ -176,16 +176,97 @@ export function validateAndNormalizeDescriptive(q, subject) {
  * @param {string} subject — course label for metadata only
  * @param {{ focusTopic?: string, topicList?: string[], resourceMode?: boolean }} [opts]
  */
+export function buildCurriculumGuidanceBlock({ board, classLevel, subject } = {}) {
+  const b = String(board || '').trim();
+  const cl = String(classLevel || '').trim();
+  const sub = String(subject || '').trim();
+  if (!b && !cl && !sub) return '';
+  return `
+CURRICULUM & LEVEL (mandatory):
+- Board: ${b || 'unspecified'}
+- Class/Grade: ${cl || 'unspecified'}
+- Subject: ${sub || 'unspecified'}
+- Generate ORIGINAL questions appropriate for this board, class, and subject.
+- Use any provided syllabus/curriculum excerpts as scope and depth guidance only — NOT as a question bank.
+- Do NOT copy or lightly rephrase existing questions from source material.
+- Align difficulty, vocabulary, and concepts with the stated class level.
+`;
+}
+
+/** Web + mapped curriculum: concepts from syllabus, not syllabus-recall questions. */
+export function buildCurriculumWebGenerationBlock({ curriculumTopicGuidance, curriculum } = {}) {
+  const guidance = String(curriculumTopicGuidance || '').trim().slice(0, 3000);
+  const subj = String(curriculum?.subject || '').trim() || 'this subject';
+  return `
+CURRICULUM-GUIDED WEB GENERATION (mandatory):
+- Use strong ${subj} knowledge for the stated board, class, and subject.
+- Admin curriculum defines WHICH CONCEPTS to assess — not question wording and not chapter-name trivia.
+- Generate ORIGINAL questions: conceptual, numerical, application, scenario-based, and real-world where appropriate.
+- NEVER ask meta/syllabus recall questions. Forbidden patterns include:
+  * "What is the topic of the chapter ...?"
+  * "Which chapter covers / is related to ...?"
+  * "What is covered in [chapter or unit title]?"
+  * Any question whose answer is only a chapter name, unit title, or syllabus label
+- Do NOT put chapter titles, unit names, or resource/document titles in question stems.
+- JSON "topic" field = the CONCEPT tested (e.g. "Decimal place value"), not a chapter heading.
+${guidance ? `\nCURRICULUM SCOPE FOR QUESTION AUTHORS:\n${guidance}\n` : ''}`;
+}
+
+export function buildConceptTopicsBlock(topicList = []) {
+  if (!topicList.length) return '';
+  return `
+CONCEPT TOPICS (assess these ideas — do NOT ask students to name chapters or units):
+${topicList.map((t) => `- ${t}`).join('\n')}
+`;
+}
+
+const SYLLABUS_META_PATTERNS = [
+  /which chapter/i,
+  /what is the topic of/i,
+  /topic of the chapter/i,
+  /which unit (covers|deals|is|relates)/i,
+  /name of the chapter/i,
+  /what is covered in/i,
+  /syllabus/i,
+  /related to symmetry and recognizing shapes/i,
+  /chapter (is|covers|deals|relates)/i,
+];
+
+export function looksLikeSyllabusMetaQuestion(question) {
+  const q = String(question || '').trim();
+  if (!q) return true;
+  return SYLLABUS_META_PATTERNS.some((re) => re.test(q));
+}
+
 export function buildQualityPromptRules(subject, opts = {}) {
-  const { focusTopic, topicList = [], resourceMode = false } = opts;
-  const topicBlock = topicList.length
-    ? `\nTEACHER TOPICS (must align; set JSON "topic" to the matching label):\n${topicList.map((t) => `- ${t}`).join('\n')}`
+  const {
+    focusTopic,
+    topicList = [],
+    resourceMode = false,
+    additionalInstructions = '',
+    curriculum,
+    curriculumWebMode = false,
+    curriculumTopicGuidance = '',
+  } = opts;
+  const curriculumBlock = curriculum ? buildCurriculumGuidanceBlock(curriculum) : '';
+  const webBlock = curriculumWebMode
+    ? buildCurriculumWebGenerationBlock({ curriculumTopicGuidance, curriculum })
     : '';
+  const topicBlock = curriculumWebMode && topicList.length
+    ? buildConceptTopicsBlock(topicList)
+    : (topicList.length
+      ? `\nTEACHER TOPICS (must align; set JSON "topic" to the matching label):\n${topicList.map((t) => `- ${t}`).join('\n')}`
+      : '');
+  const effectiveResourceMode = curriculumWebMode ? false : resourceMode;
   const focusBlock = focusTopic
     ? `\nREQUIRED FOCUS for every question in this batch: "${focusTopic}" (use this exact topic label in the "topic" field).`
     : '';
-  const resourceBlock = resourceMode
+  const resourceBlock = effectiveResourceMode
     ? `\nRESOURCE MODE: Use ONLY provided source material. Topics guide what to ask — do not introduce content outside the source that does not match the requested topic.`
+    : '';
+  const extra = String(additionalInstructions || '').trim().slice(0, 4000);
+  const additionalBlock = extra
+    ? `\nADDITIONAL INSTRUCTOR INSTRUCTIONS (follow carefully):\n${extra}`
     : '';
 
   return `
@@ -195,7 +276,7 @@ CLASSROOM LANGUAGE (mandatory):
 - The course name "${subject}" is for your context only; do not repeat it in question stems.
 - Vary openings: What, Which, Why, How, When, Under what conditions, Compare, Identify, etc.
 - Avoid template repetition (not every question starting the same way).
-${topicBlock}${focusBlock}${resourceBlock}
+${curriculumBlock}${webBlock}${topicBlock}${focusBlock}${resourceBlock}${additionalBlock}
 
 MCQ QUALITY (when applicable):
 - Four distinct, plausible options — no obvious throwaways.
@@ -275,12 +356,19 @@ export function interleaveByTopic(questions) {
  * }} opts
  */
 export async function finalizeQuestionSet(questions, opts) {
-  const { subject, topicList, targetCount, normalize, regenerateOne } = opts;
+  const {
+    subject, topicList, targetCount, normalize, regenerateOne,
+    skipTopicCoverageRegen = false,
+    maxFillRegens,
+  } = opts;
   let pool = questions.map((q) => normalize(q)).filter(Boolean);
 
   pool = deduplicateQuestions(pool);
 
+  const fillCap = maxFillRegens ?? Math.min(6, Math.max(2, Math.floor(targetCount / 2)));
+
   const tryRegen = async (focusTopic, priorItems) => {
+    if (!regenerateOne) return null;
     for (let attempt = 0; attempt < MAX_REGEN_ATTEMPTS; attempt += 1) {
       const candidate = await regenerateOne({ focusTopic, priorItems });
       if (!candidate) continue;
@@ -292,11 +380,13 @@ export async function finalizeQuestionSet(questions, opts) {
     return null;
   };
 
-  for (const missingTopic of findUncoveredTopics(pool, topicList)) {
-    const added = await tryRegen(missingTopic, pool);
-    if (added) {
-      added.topic = missingTopic;
-      pool.push(added);
+  if (!skipTopicCoverageRegen && topicList.length > 0 && topicList.length <= 8) {
+    for (const missingTopic of findUncoveredTopics(pool, topicList)) {
+      const added = await tryRegen(missingTopic, pool);
+      if (added) {
+        added.topic = missingTopic;
+        pool.push(added);
+      }
     }
   }
 
@@ -304,7 +394,7 @@ export async function finalizeQuestionSet(questions, opts) {
 
   let fillIdx = 0;
   const fillPlan = buildTopicAllocation(targetCount, topicList);
-  while (pool.length < targetCount && fillIdx < targetCount * MAX_REGEN_ATTEMPTS) {
+  while (pool.length < targetCount && fillIdx < fillCap) {
     const slot = fillPlan[fillIdx % fillPlan.length];
     const added = await tryRegen(slot.topic || undefined, pool);
     if (added) {
@@ -328,25 +418,41 @@ export async function orchestrateTopicBasedGeneration({
   topics,
   generateBatch,
   finalizeOpts,
+  singleBatch = false,
+  lightFinalize = false,
 }) {
   const topicList = parseTopicList(topics);
-  const plan = buildTopicAllocation(numQuestions, topicList);
   /** @type {T[]} */
   let all = [];
 
-  for (const slot of plan) {
-    if (slot.count < 1) continue;
-    const batch = await generateBatch({
-      count: slot.count,
-      focusTopic: slot.topic || undefined,
-      priorItems: all,
+  const useSingleBatch = singleBatch
+    || topicList.length === 0
+    || topicList.length > 6;
+
+  if (useSingleBatch) {
+    all = await generateBatch({
+      count: numQuestions,
+      focusTopic: undefined,
+      priorItems: [],
     });
-    all.push(...batch);
+  } else {
+    const plan = buildTopicAllocation(numQuestions, topicList);
+    for (const slot of plan) {
+      if (slot.count < 1) continue;
+      const batch = await generateBatch({
+        count: slot.count,
+        focusTopic: slot.topic || undefined,
+        priorItems: all,
+      });
+      all.push(...batch);
+    }
   }
 
   return finalizeQuestionSet(all, {
     ...finalizeOpts,
     topicList,
     targetCount: numQuestions,
+    skipTopicCoverageRegen: lightFinalize || topicList.length > 6,
+    maxFillRegens: lightFinalize ? 2 : Math.min(6, numQuestions),
   });
 }

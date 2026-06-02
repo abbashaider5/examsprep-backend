@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import Resource from '../models/Resource.js';
 import ResourceChunk from '../models/ResourceChunk.js';
 import logger from '../utils/logger.js';
 import { embedTexts } from './embeddingService.js';
@@ -153,4 +154,50 @@ export const retrieveGroundingContext = async (resourceId, opts) => {
     }
   }
   return packChunks(primary, maxChars, 'lexical');
+};
+
+/**
+ * Retrieve grounded syllabus/curriculum context from all ready admin resources
+ * for a board + class + subject mapping.
+ */
+export const retrieveCurriculumGroundingContext = async ({
+  board, classLevel, subject, topics = [], maxChars = 16_000, topK = 14,
+}) => {
+  const resources = await Resource.find({
+    scope: 'admin',
+    board,
+    classLevel,
+    subject,
+    processingStatus: 'ready',
+    chunkCount: { $gt: 0 },
+  }).select('_id title').lean();
+
+  if (!resources.length) {
+    return { context: '', primaryResourceId: null, resourceIds: [] };
+  }
+
+  const label = `${board} Class ${classLevel} ${subject}`;
+  const perCap = Math.max(2000, Math.floor(maxChars / resources.length));
+  const parts = [];
+  const resourceIds = [];
+
+  for (const res of resources) {
+    const { context } = await retrieveGroundingContext(res._id, {
+      subject: label,
+      topics,
+      maxChars: perCap,
+      topK,
+    });
+    if (context && context.length > 40) {
+      parts.push(`[Curriculum: ${res.title || label}]\n${context}`);
+      resourceIds.push(res._id);
+    }
+  }
+
+  const merged = parts.join('\n\n').slice(0, maxChars);
+  return {
+    context: merged,
+    primaryResourceId: resourceIds[0] || resources[0]._id,
+    resourceIds,
+  };
 };

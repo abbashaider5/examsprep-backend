@@ -26,6 +26,7 @@ validateEnv();
 
 import { connectDB, ensureDbConnected } from './config/db.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { requestContextMiddleware } from './utils/requestContext.js';
 import { apiLimiter } from './middleware/rateLimiter.js';
 import { getSettings } from './models/SystemSettings.js';
 import logger from './utils/logger.js';
@@ -93,10 +94,16 @@ const corsOptions = createCorsOptions();
 app.use(helmet({ crossOriginEmbedderPolicy: false, contentSecurityPolicy: false }));
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-app.use(express.json({ limit: '15mb' }));
+app.use(express.json({
+  limit: '15mb',
+  verify: (req, res, buf) => {
+    req.rawBody = buf?.toString('utf8') || '';
+  },
+}));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser(process.env.COOKIE_SECRET));
 app.use(mongoSanitize());
+app.use(requestContextMiddleware);
 
 if (process.env.NODE_ENV !== 'test') {
   app.use(morgan('dev', { stream: { write: (msg) => logger.http(msg.trim()) } }));

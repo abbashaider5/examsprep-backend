@@ -3,7 +3,7 @@ import multer from 'multer';
 import { RESOURCE_UPLOAD_MAX_BYTES } from '../config/uploadLimits.js';
 import {
   deleteResource,
-  getAdminResources, getGroupResources,
+  getAdminResources, getCurriculumMappings, getGroupResources,
   getMyResources,
   getResourceProcessingStatus,
   getResourceText,
@@ -84,6 +84,7 @@ export const handleResourceFromTextPost = (req, res, next) => {
 router.post('/from-text', handleResourceFromTextPost);
 router.post('/import-text', handleResourceFromTextPost);
 router.post('/upload-bytes', uploadResourceBytes);
+router.get('/curriculum-mappings', getCurriculumMappings);
 router.get('/admin', getAdminResources);
 router.get('/mine', getMyResources);
 router.get('/group/:groupId', getGroupResources);

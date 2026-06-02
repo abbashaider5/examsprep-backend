@@ -129,6 +129,14 @@ async function finalizeResourceIndexing(resourceId, resource, extracted, cleaned
   });
 
   await invalidateResourceCaches(resource);
+  if (resource.scope === 'admin' && resource.board && resource.classLevel && resource.subject) {
+    const { invalidateCurriculumConceptCache } = await import('./curriculumConceptCacheService.js');
+    await invalidateCurriculumConceptCache({
+      board: resource.board,
+      classLevel: resource.classLevel,
+      subject: resource.subject,
+    });
+  }
   logger.info(`[resourceProcessing] Resource ${resourceId} ready with ${docs.length} chunks`);
 }
 

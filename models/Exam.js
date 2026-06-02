@@ -44,6 +44,11 @@ const questionSchema = new mongoose.Schema({
 const examSchema = new mongoose.Schema({
   title:      { type: String, required: true, trim: true },
   subject:    { type: String, required: true, trim: true },
+  board:      { type: String, enum: ['CBSE', 'ICSE', ''], default: '' },
+  /** School exams: class 5–12 from admin resource mappings */
+  classLevel: { type: String, default: '', trim: true },
+  /** Optional custom guidance appended to all AI generation for this exam */
+  additionalAiInstructions: { type: String, default: '', trim: true, maxlength: 4000 },
   enterpriseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Enterprise', default: null, index: true },
   difficulty: { type: String, enum: ['easy', 'medium', 'hard'], default: 'medium' },
   examType:   { type: String, enum: ['mcq', 'descriptive', 'mixed', 'coding'], default: 'mcq' },
