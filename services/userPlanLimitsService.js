@@ -4,6 +4,7 @@ import Subscription from '../models/Subscription.js';
 import User, { PLAN_LIMITS, PLAN_MAX_Q } from '../models/User.js';
 import { getSettings } from '../models/SystemSettings.js';
 import { enterpriseSubscriptionIsActive } from './subscriptionLifecycleService.js';
+import { findDefaultInstructorTrialPlan } from './instructorTrialService.js';
 
 /** Human-readable labels for plan feature flags (admin-defined keys). */
 export const FEATURE_LABELS = {
@@ -226,7 +227,13 @@ export async function resolveActivePlanForUser(user) {
   }
 
   if (user.instructorTrialEndsAt && user.instructorTrialEndsAt > now) {
-    const trialPlan = await findRecommendedIndividualPlan();
+    let trialPlan = null;
+    if (user.individualPlanCode) {
+      trialPlan = await findIndividualPlanByCode(user.individualPlanCode, { includeInactive: true });
+    }
+    if (!trialPlan) {
+      trialPlan = await findDefaultInstructorTrialPlan();
+    }
     if (trialPlan) {
       return {
         source: 'trial',

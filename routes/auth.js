@@ -1,5 +1,5 @@
 import express from 'express';
-import { forgotPassword, getMe, googleAuth, login, logout, refreshAccessToken, requestOTP, resetPassword, signup, verifyOTP } from '../controllers/authController.js';
+import { forgotPassword, getMe, googleAuth, login, logout, refreshAccessToken, requestOTP, resetPassword, signup, verifyOTP, completeAccountOnboarding } from '../controllers/authController.js';
 import { protect } from '../middleware/auth.js';
 import { authLimiter } from '../middleware/rateLimiter.js';
 import { loginValidation, signupValidation, validate } from '../middleware/validation.js';
@@ -12,6 +12,10 @@ const emailNormalizeOpts = { gmail_remove_dots: false, all_lowercase: true };
 router.post('/signup', authLimiter, signupValidation, validate, signup);
 router.post('/login', authLimiter, loginValidation, validate, login);
 router.post('/google', authLimiter, googleAuth);
+router.post('/complete-onboarding', protect, authLimiter, [
+  body('accountType').isIn(['student', 'instructor']).withMessage('Invalid account type'),
+  validate,
+], completeAccountOnboarding);
 router.post('/verify-otp', authLimiter, [
   body('email').isEmail().normalizeEmail(emailNormalizeOpts),
   body('otp').isLength({ min: 6, max: 6 }).isNumeric().withMessage('OTP must be 6 digits'),

@@ -11,10 +11,10 @@ import User from '../models/User.js';
 import UserExamShuffle from '../models/UserExamShuffle.js';
 import Enterprise from '../models/Enterprise.js';
 import { PROCTORING_SCREENSHOT_RETENTION_DAYS } from '../services/proctoringScreenshotRetention.js';
+import { assignInstructorTrialToUser } from '../services/instructorTrialService.js';
 import { buildInstructorExamReportData } from '../utils/instructorExamReportData.js';
 import { buildDisplayQuestions, getBaseQuestionsForExam } from '../utils/examShuffleRuntime.js';
 import { getSettings } from '../models/SystemSettings.js';
-import { addMonthsClamped } from '../services/subscriptionLifecycleService.js';
 import { sendInstructorInviteEmail } from '../services/emailService.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
 import { fromReq, log } from '../utils/activityLogger.js';
@@ -72,13 +72,10 @@ export const becomeInstructor = async (req, res, next) => {
       if (user.instructorTrialUsed) {
         return next(new AppError('Active premium plan required to become an instructor.', 403));
       }
-      const trialEnd = addMonthsClamped(now, 1);
-      user.instructorTrialUsed = true;
-      user.instructorTrialEndsAt = trialEnd;
-      user.plan = 'pro';
-      user.planExpiresAt = trialEnd;
-      user.examsCreatedThisMonth = 0;
-      user.monthlyExamResetDate = now;
+      const trialResult = await assignInstructorTrialToUser(user);
+      if (!trialResult.assigned) {
+        return next(new AppError('Instructor trial is not available right now. Please upgrade to a paid plan.', 403));
+      }
     }
 
     user.role = 'instructor';

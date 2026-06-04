@@ -48,6 +48,9 @@ export const createPlan = async (req, res, next) => {
     if (req.body?.isRecommended) {
       await Plan.updateMany({ audience: 'individual', isRecommended: true }, { $set: { isRecommended: false } });
     }
+    if (req.body?.isDefaultInstructorTrial) {
+      await Plan.updateMany({ audience: 'individual', isDefaultInstructorTrial: true }, { $set: { isDefaultInstructorTrial: false } });
+    }
     let sortOrder = Number(req.body?.sortOrder);
     if (!Number.isFinite(sortOrder)) {
       const top = await Plan.findOne({ audience: 'individual' }).sort({ sortOrder: -1 }).select('sortOrder').lean();
@@ -65,6 +68,7 @@ export const createPlan = async (req, res, next) => {
       billing: req.body.billing || {},
       sortOrder,
       isRecommended: Boolean(req.body.isRecommended),
+      isDefaultInstructorTrial: Boolean(req.body.isDefaultInstructorTrial),
       isActive: req.body.isActive !== false,
       audience: 'individual',
     });
@@ -91,6 +95,15 @@ export const updatePlan = async (req, res, next) => {
         await Plan.updateMany({ audience: 'individual', isRecommended: true, _id: { $ne: plan._id } }, { $set: { isRecommended: false } });
       }
       plan.isRecommended = req.body.isRecommended;
+    }
+    if (typeof req.body?.isDefaultInstructorTrial === 'boolean') {
+      if (req.body.isDefaultInstructorTrial) {
+        await Plan.updateMany(
+          { audience: 'individual', isDefaultInstructorTrial: true, _id: { $ne: plan._id } },
+          { $set: { isDefaultInstructorTrial: false } },
+        );
+      }
+      plan.isDefaultInstructorTrial = req.body.isDefaultInstructorTrial;
     }
     await plan.save();
     res.json({ plan });

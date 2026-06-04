@@ -49,10 +49,12 @@ const planSchema = new mongoose.Schema({
   billing: {
     autoPayAllowed: { type: Boolean, default: true },
     manualPaymentAllowed: { type: Boolean, default: true },
-    trialDays: { type: Number, default: 0 },
+    trialDays: { type: Number, default: 30 },
     gracePeriodDays: { type: Number, default: 7 },
   },
   isRecommended: { type: Boolean, default: false, index: true },
+  /** Only one active individual plan should be marked; used for new instructor signups. */
+  isDefaultInstructorTrial: { type: Boolean, default: false, index: true },
   isActive: { type: Boolean, default: true, index: true },
 }, { timestamps: true });
 

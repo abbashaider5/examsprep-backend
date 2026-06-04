@@ -16,6 +16,13 @@ export {
 } from './userPlanLimitsService.js';
 
 export {
+  findDefaultInstructorTrialPlan,
+  resolveTrialDays,
+  assignInstructorTrialToUser,
+  applyInstructorSignupOnboarding,
+} from './instructorTrialService.js';
+
+export {
   computeExamUsageSnapshot,
   computeExamUsageSnapshotWithEnterprise,
   consumeExamGenerationSlots,

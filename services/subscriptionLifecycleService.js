@@ -1,5 +1,7 @@
 import Enterprise from '../models/Enterprise.js';
 import User from '../models/User.js';
+import Subscription from '../models/Subscription.js';
+import { expireTrialSubscriptionsForUser } from './instructorTrialService.js';
 
 export function addMonthsClamped(date, months) {
   const d = new Date(date.getTime());
@@ -151,6 +153,7 @@ export async function processPersonalSubscriptionLifecycle(userId) {
     { _id: userId, instructorTrialEndsAt: { $lte: now } },
     { $set: { instructorTrialEndsAt: null } },
   );
+  await expireTrialSubscriptionsForUser(userId);
   const user = await User.findById(userId);
   if (!user) return user;
 
@@ -166,6 +169,7 @@ export async function processPersonalSubscriptionLifecycle(userId) {
       if (user.plan === 'pro' || user.plan === 'enterprise') {
         user.plan = 'free';
         user.planExpiresAt = null;
+        user.individualPlanCode = '';
         user.extraExamCreditsBalance = 0;
       }
       await user.save({ validateBeforeSave: false });

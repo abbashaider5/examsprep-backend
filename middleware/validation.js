@@ -15,6 +15,7 @@ export const signupValidation = [
   body('name').trim().notEmpty().withMessage('Name is required').isLength({ max: 60 }),
   body('email').isEmail().normalizeEmail(emailNormalizeOpts).withMessage('Valid email required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  body('accountType').optional().isIn(['student', 'instructor']).withMessage('Invalid account type'),
 ];
 
 export const loginValidation = [
