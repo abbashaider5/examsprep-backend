@@ -1,10 +1,10 @@
-import './utils/runtimePolyfills.js';
 import dns from 'node:dns';
+import './utils/runtimePolyfills.js';
 /** Prefer IPv4 before first outbound connections (helps Cloudinary/CDN on some Windows dual-stack setups). */
 if (typeof dns.setDefaultResultOrder === 'function') {
   dns.setDefaultResultOrder('ipv4first');
 }
-
+// Note: top-level await is supported in ES modules (package.json "type": "module") — no need for an async IIFE wrapper.
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -24,16 +24,18 @@ const __dirname = path.dirname(__filename);
 import { validateEnv } from './utils/validateEnv.js';
 validateEnv();
 
+import { corsHeadersMiddleware, createCorsOptions } from './config/cors.js';
 import { connectDB, ensureDbConnected } from './config/db.js';
 import { errorHandler } from './middleware/errorHandler.js';
-import { requestContextMiddleware } from './utils/requestContext.js';
 import { apiLimiter } from './middleware/rateLimiter.js';
 import { getSettings } from './models/SystemSettings.js';
-import logger from './utils/logger.js';
-import { seedHelpTopicsIfEmpty } from './utils/seedHelpTopics.js';
 import { scheduleProctoringScreenshotCleanup } from './services/proctoringScreenshotRetention.js';
-import { corsHeadersMiddleware, createCorsOptions } from './config/cors.js';
+import logger from './utils/logger.js';
+import { requestContextMiddleware } from './utils/requestContext.js';
+import { seedHelpTopicsIfEmpty } from './utils/seedHelpTopics.js';
 
+import { uploadResourceBytes } from './controllers/resourceController.js';
+import { protect } from './middleware/auth.js';
 import adminRoutes from './routes/admin.js';
 import announcementRoutes from './routes/announcements.js';
 import authRoutes from './routes/auth.js';
@@ -54,8 +56,6 @@ import resourceRoutes, { handleResourceCreatePost, handleResourceFromTextPost } 
 import resultRoutes from './routes/result.js';
 import settingsRoutes from './routes/settings.js';
 import ticketRoutes from './routes/tickets.js';
-import { protect } from './middleware/auth.js';
-import { uploadResourceBytes } from './controllers/resourceController.js';
 
 const app = express();
 
