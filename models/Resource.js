@@ -13,7 +13,7 @@ const resourceSchema = new mongoose.Schema({
   /** Subject label — curriculum subject for admin resources; optional label for instructor uploads */
   subject:           { type: String, default: '', trim: true },
   /** CBSE / ICSE — required for scope admin resources */
-  board:             { type: String, enum: ['CBSE', 'ICSE'], default: '' },
+  board:             { type: String, enum: ['CBSE', 'ICSE', ''], default: '' },
   /** Class 5–12 — required for scope admin resources */
   classLevel:        { type: String, default: '', trim: true },
   // 'admin' = global resource visible to all instructors

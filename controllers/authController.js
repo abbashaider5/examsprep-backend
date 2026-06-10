@@ -92,8 +92,9 @@ const beginTwoFactorLogin = async ({ user, email, settings, req, res }) => {
 };
 
 const normalizeAccountType = (raw) => (String(raw || '').toLowerCase() === 'instructor' ? 'instructor' : 'student');
+const normalizeOrganizationType = (raw) => (String(raw || '').toLowerCase() === 'institute' ? 'institute' : 'school');
 
-async function finalizeNewUserOnboarding(user, { accountType, enterpriseInviteToken }) {
+async function finalizeNewUserOnboarding(user, { accountType, organizationType, enterpriseInviteToken }) {
   const wantsInstructor = normalizeAccountType(accountType) === 'instructor';
   const hasEnterpriseInvite = !!(enterpriseInviteToken && typeof enterpriseInviteToken === 'string');
 
@@ -102,7 +103,10 @@ async function finalizeNewUserOnboarding(user, { accountType, enterpriseInviteTo
   }
 
   if (wantsInstructor) {
-    await applyInstructorSignupOnboarding(user, { skipTrial: false });
+    await applyInstructorSignupOnboarding(user, {
+      skipTrial: false,
+      organizationType: normalizeOrganizationType(organizationType),
+    });
     return '/instructor-dashboard';
   }
 
@@ -120,13 +124,22 @@ export const signup = async (req, res, next) => {
       return next(new AppError('New registrations are currently disabled.', 403));
     }
 
-    const { name, email, password, examInviteToken, enterpriseInviteToken, accountType } = req.body;
+    const { name, email, password, examInviteToken, enterpriseInviteToken, accountType, organizationType } = req.body;
     const existing = await User.findOne({ email });
     if (existing) return next(new AppError('An account with this email already exists.', 409));
 
     const user = await User.create({ name, email, password });
 
-    await log({ user, action: 'signup', category: 'auth', metadata: { accountType: normalizeAccountType(accountType) }, ...fromReq(req) });
+    await log({
+      user,
+      action: 'signup',
+      category: 'auth',
+      metadata: {
+        accountType: normalizeAccountType(accountType),
+        organizationType: normalizeAccountType(accountType) === 'instructor' ? normalizeOrganizationType(organizationType) : null,
+      },
+      ...fromReq(req),
+    });
 
     if (settings.twoFactorAuthEnabled) {
       const otp = await OTPCode.generate(email, 'signup');
@@ -139,6 +152,7 @@ export const signup = async (req, res, next) => {
         examInviteToken: examInviteToken || null,
         enterpriseInviteToken: enterpriseInviteToken || null,
         accountType: normalizeAccountType(accountType),
+        organizationType: normalizeAccountType(accountType) === 'instructor' ? normalizeOrganizationType(organizationType) : null,
         message: 'Verify your email to complete signup.',
       });
     }
@@ -150,7 +164,7 @@ export const signup = async (req, res, next) => {
       sendWelcomeEmail({ email, name, role: user.role }).catch(logger.error);
     }
 
-    let redirectPath = await finalizeNewUserOnboarding(user, { accountType, enterpriseInviteToken });
+    let redirectPath = await finalizeNewUserOnboarding(user, { accountType, organizationType, enterpriseInviteToken });
     if (!redirectPath && examInviteToken) {
       redirectPath = await acceptExamInviteForNewUser(user, examInviteToken);
     }
@@ -167,7 +181,7 @@ export const signup = async (req, res, next) => {
 // ── Verify OTP (completes signup or login) ────────────────────────────────────
 export const verifyOTP = async (req, res, next) => {
   try {
-    const { email, otp, purpose = 'login', examInviteToken, enterpriseInviteToken, accountType } = req.body;
+    const { email, otp, purpose = 'login', examInviteToken, enterpriseInviteToken, accountType, organizationType } = req.body;
     if (!email || !otp) return next(new AppError('Email and OTP are required', 400));
 
     const result = await OTPCode.verify(email, otp, purpose);
@@ -196,7 +210,7 @@ export const verifyOTP = async (req, res, next) => {
 
     let redirectPath = null;
     if (purpose === 'signup') {
-      redirectPath = await finalizeNewUserOnboarding(user, { accountType, enterpriseInviteToken });
+      redirectPath = await finalizeNewUserOnboarding(user, { accountType, organizationType, enterpriseInviteToken });
       if (!redirectPath && examInviteToken) {
         redirectPath = await acceptExamInviteForNewUser(user, examInviteToken);
       }
@@ -372,7 +386,7 @@ export const googleAuth = async (req, res, next) => {
 // ── Complete account onboarding (post-Google signup) ───────────────────────────
 export const completeAccountOnboarding = async (req, res, next) => {
   try {
-    const { accountType, examInviteToken } = req.body;
+    const { accountType, organizationType, examInviteToken } = req.body;
     const user = await User.findById(req.user._id);
     if (!user) return next(new AppError('User not found.', 404));
 
@@ -398,6 +412,7 @@ export const completeAccountOnboarding = async (req, res, next) => {
 
     let redirectPath = await finalizeNewUserOnboarding(user, {
       accountType: normalizeAccountType(accountType),
+      organizationType: normalizeOrganizationType(organizationType),
       enterpriseInviteToken: null,
     });
     if (!redirectPath && examInviteToken) {
@@ -411,7 +426,10 @@ export const completeAccountOnboarding = async (req, res, next) => {
       user,
       action: 'onboarding_complete',
       category: 'auth',
-      metadata: { accountType: normalizeAccountType(accountType) },
+      metadata: {
+        accountType: normalizeAccountType(accountType),
+        organizationType: normalizeAccountType(accountType) === 'instructor' ? normalizeOrganizationType(organizationType) : null,
+      },
       ...fromReq(req),
     });
 
@@ -563,6 +581,7 @@ const sanitizeUser = (user) => ({
   name: user.name,
   email: user.email,
   role: user.role,
+  organizationType: user.organizationType || 'school',
   isInstructor: ['instructor', 'admin'].includes(user.role),
   isPrincipal: user.role === 'principal',
   enterpriseId: user.enterpriseId || null,

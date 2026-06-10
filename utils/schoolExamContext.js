@@ -16,14 +16,28 @@ export function isInstituteEnterpriseInstructor(user, ent) {
   return user?.role === 'instructor' && Boolean(ent) && ent.mode === 'institute';
 }
 
-/** Individual (non-enterprise) instructors use board/class/subject dropdowns. */
+/** Individual (non-enterprise) instructors. */
 export function isIndividualInstructor(user) {
   return user?.role === 'instructor' && !user?.enterpriseId;
 }
 
-/** School + individual: curriculum dropdowns, no free-text subject. */
+export function isInstituteIndividualInstructor(user) {
+  return isIndividualInstructor(user)
+    && String(user?.organizationType || 'school').toLowerCase() === 'institute';
+}
+
+export function isSchoolIndividualInstructor(user) {
+  return isIndividualInstructor(user) && !isInstituteIndividualInstructor(user);
+}
+
+/** School enterprise + individual school: curriculum dropdowns from admin mappings. */
 export function usesCurriculumExamWorkflow(user, ent) {
-  return isSchoolEnterpriseInstructor(user, ent) || isIndividualInstructor(user);
+  return isSchoolEnterpriseInstructor(user, ent) || isSchoolIndividualInstructor(user);
+}
+
+/** Institute enterprise + individual institute: free-text subject, no board/class. */
+export function isInstituteExamWorkflow(user, ent) {
+  return isInstituteEnterpriseInstructor(user, ent) || isInstituteIndividualInstructor(user);
 }
 
 export function resolveAdditionalAiInstructions(req, exam = null) {
@@ -57,7 +71,7 @@ export async function resolveExamCurriculumFields(req, user, { subject: subjectI
   const ent = await getEnterpriseContext(user.enterpriseId);
   const subject = String(subjectIn || '').trim();
 
-  if (isInstituteEnterpriseInstructor(user, ent)) {
+  if (isInstituteExamWorkflow(user, ent)) {
     if (!subject) throw new AppError('Subject is required', 400);
     return { board: '', classLevel: '', subject };
   }

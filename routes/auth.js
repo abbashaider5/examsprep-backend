@@ -14,6 +14,7 @@ router.post('/login', authLimiter, loginValidation, validate, login);
 router.post('/google', authLimiter, googleAuth);
 router.post('/complete-onboarding', protect, authLimiter, [
   body('accountType').isIn(['student', 'instructor']).withMessage('Invalid account type'),
+  body('organizationType').optional().isIn(['school', 'institute']).withMessage('Invalid organization type'),
   validate,
 ], completeAccountOnboarding);
 router.post('/verify-otp', authLimiter, [

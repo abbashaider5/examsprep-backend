@@ -4,6 +4,9 @@ import {
   getExamScreenshots, getInstructorAnalytics, getMyAcceptedInvites, getStudentExamReport,
   getMyExams, getMyPendingInvites, reevaluateResult, rejectInvite, sendClassInvite, sendGroupInvite, sendInvite, validateInviteToken,
 } from '../controllers/instructorController.js';
+import {
+  enrollViaAccessKey, getExamAccessKey, removeExamAccessKey, saveExamAccessKey,
+} from '../controllers/examAccessKeyController.js';
 import { protect, requireInstructor } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -17,6 +20,7 @@ router.post('/invite/:token/accept', protect, acceptInvite);
 router.post('/invite/:token/reject', protect, rejectInvite);
 router.get('/my-invites', protect, getMyPendingInvites);
 router.get('/my-accepted-invites', protect, getMyAcceptedInvites);
+router.post('/access-keys/enroll', protect, enrollViaAccessKey);
 
 // Instructor-only routes
 router.use(protect, requireInstructor);
@@ -24,6 +28,9 @@ router.get('/exams', getMyExams);
 router.post('/exams/:examId/invite', sendInvite);
 router.post('/exams/:examId/invite-group', sendGroupInvite);
 router.post('/exams/:examId/invite-class', sendClassInvite);
+router.get('/exams/:examId/access-key', getExamAccessKey);
+router.put('/exams/:examId/access-key', saveExamAccessKey);
+router.delete('/exams/:examId/access-key', removeExamAccessKey);
 router.get('/exams/:examId/invites', getExamInvites);
 router.get('/exams/:examId/report', getExamReport);
 router.get('/exams/:examId/screenshots', getExamScreenshots);

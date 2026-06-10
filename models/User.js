@@ -15,6 +15,8 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true, minlength: 6, select: false },
   role: { type: String, enum: ['user', 'instructor', 'admin', 'principal'], default: 'user' },
+  /** Individual instructors: school (curriculum) vs institute (custom exams). Defaults to school for legacy users. */
+  organizationType: { type: String, enum: ['school', 'institute'], default: 'school' },
   /** Set for principal + enterprise instructors (+ optional enterprise students in school mode). */
   enterpriseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Enterprise', default: null, index: true },
   /** School mode: student accounts linked to a class within the enterprise. */

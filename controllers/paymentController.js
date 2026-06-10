@@ -461,6 +461,78 @@ export const createOrder = async (req, res, next) => {
   }
 };
 
+/**
+ * Create Razorpay subscription checkout for the user's current active catalog plan.
+ * Mandate approval still happens in Razorpay UI; autoRenew flips true after enableAutoRenew.
+ */
+async function buildAutoPayCheckoutForUser(user, { requestedPlanCode = '' } = {}) {
+  if (!user || !isInstructorLike(user)) return null;
+  if (effectivePlanType(user) === 'free') return null;
+
+  const targetPlanDoc = await resolveAutoPayTargetPlan(user, requestedPlanCode);
+  if (!targetPlanDoc?.pricing?.monthlyPricePaise) return null;
+
+  const settings = await getSettings();
+  const rzp = getRzp();
+  const planCode = targetPlanDoc.code;
+  const amount = Math.max(100, Math.round(Number(targetPlanDoc.pricing.monthlyPricePaise) || 0));
+
+  if (user.razorpaySubscriptionId) {
+    try {
+      await rzp.subscriptions.cancel(user.razorpaySubscriptionId, { cancel_at_cycle_end: 0 });
+    } catch (e) {
+      logger.warn(`autopay replace cancel old failed ${user.razorpaySubscriptionId}: ${e.message}`);
+    }
+  }
+
+  const razorpayPlanId = await ensureRazorpayMonthlyPlan(settings, amount, planCode);
+  const subscription = await rzp.subscriptions.create({
+    plan_id: razorpayPlanId,
+    customer_notify: 1,
+    total_count: 120,
+    quantity: 1,
+    notes: {
+      userId: String(user._id),
+      source: 'likhitai_autopay',
+      individualPlanCode: planCode,
+    },
+  });
+
+  const initialNextBilling = extractNextBillingDateFromRazorpaySub(subscription, user);
+
+  await upsertSubscriptionForRecurring({
+    user,
+    plan: 'pro',
+    individualPlanCode: planCode,
+    amountPaid: amount,
+    durationMonths: 1,
+    startDate: new Date(),
+    endDate: user.planExpiresAt && user.planExpiresAt > new Date() ? user.planExpiresAt : new Date(),
+    razorpaySubscriptionId: subscription.id,
+    status: 'pending',
+    autoRenewEnabled: false,
+    subscriptionStatus: subscription.status || 'created',
+    nextBillingDate: initialNextBilling,
+  });
+
+  user.plan = 'pro';
+  user.individualPlanCode = planCode;
+  user.autoRenew = false;
+  user.autoRenewProvider = 'razorpay';
+  user.razorpaySubscriptionId = subscription.id;
+  user.subscriptionStatus = subscription.status || 'created';
+  user.nextBillingDate = initialNextBilling;
+  await user.save({ validateBeforeSave: false });
+
+  return {
+    keyId: process.env.RAZORPAY_KEY_ID,
+    subscriptionId: subscription.id,
+    planCode,
+    status: subscription.status,
+    nextBillingDate: initialNextBilling,
+  };
+}
+
 /** POST /api/payments/create-subscription */
 export const createSubscriptionCheckout = async (req, res, next) => {
   try {
@@ -471,80 +543,23 @@ export const createSubscriptionCheckout = async (req, res, next) => {
       return next(new AppError('AutoPay requires an active paid plan. Upgrade first, then enable AutoPay.', 403));
     }
 
-    const { plan: requestedPlan, autoRenewEnabled = true } = req.body || {};
-    const targetPlanDoc = await resolveAutoPayTargetPlan(user, requestedPlan);
-    if (!targetPlanDoc?.pricing?.monthlyPricePaise) {
-      return next(new AppError('Could not resolve your active plan for AutoPay. Contact support.', 400));
-    }
-
-    const planCode = targetPlanDoc.code;
-    const legacyPlan = 'pro';
-    const amount = Math.max(100, Math.round(Number(targetPlanDoc.pricing.monthlyPricePaise) || 0));
-
-    const settings = await getSettings();
-
-    let rzp;
+    const { plan: requestedPlan } = req.body || {};
+    let checkout;
     try {
-      rzp = getRzp();
+      checkout = await buildAutoPayCheckoutForUser(user, { requestedPlanCode: requestedPlan });
     } catch {
       return next(new AppError('Payment system is not configured. Please contact support.', 503));
     }
-
-    const razorpayPlanId = await ensureRazorpayMonthlyPlan(settings, amount, planCode);
-
-    if (user.autoRenew && user.razorpaySubscriptionId) {
-      try {
-        await rzp.subscriptions.cancel(user.razorpaySubscriptionId, { cancel_at_cycle_end: 0 });
-      } catch (e) {
-        logger.warn(`autopay upgrade cancel old failed ${user.razorpaySubscriptionId}: ${e.message}`);
-      }
+    if (!checkout) {
+      return next(new AppError('Could not resolve your active plan for AutoPay. Contact support.', 400));
     }
 
-    const payload = {
-      plan_id: razorpayPlanId,
-      customer_notify: 1,
-      total_count: 120,
-      quantity: 1,
-      notes: {
-        userId: String(user._id),
-        source: 'likhitai_autopay',
-        individualPlanCode: planCode,
-      },
-    };
-    const subscription = await rzp.subscriptions.create(payload);
-
-    const initialNextBilling = extractNextBillingDateFromRazorpaySub(subscription, user);
-
-    await upsertSubscriptionForRecurring({
-      user,
-      plan: legacyPlan,
-      individualPlanCode: planCode,
-      amountPaid: amount,
-      durationMonths: 1,
-      startDate: new Date(),
-      endDate: user.planExpiresAt && user.planExpiresAt > new Date() ? user.planExpiresAt : new Date(),
-      razorpaySubscriptionId: subscription.id,
-      status: 'pending',
-      autoRenewEnabled: Boolean(autoRenewEnabled),
-      subscriptionStatus: subscription.status || 'created',
-      nextBillingDate: initialNextBilling,
-    });
-
-    user.plan = legacyPlan;
-    user.individualPlanCode = planCode;
-    user.autoRenew = Boolean(autoRenewEnabled);
-    user.autoRenewProvider = 'razorpay';
-    user.razorpaySubscriptionId = subscription.id;
-    user.subscriptionStatus = subscription.status || 'created';
-    user.nextBillingDate = initialNextBilling;
-    await user.save({ validateBeforeSave: false });
-
     res.json({
-      keyId: process.env.RAZORPAY_KEY_ID,
-      subscriptionId: subscription.id,
-      status: subscription.status,
-      autoRenewEnabled: user.autoRenew,
-      nextBillingDate: initialNextBilling,
+      keyId: checkout.keyId,
+      subscriptionId: checkout.subscriptionId,
+      status: checkout.status,
+      autoRenewEnabled: false,
+      nextBillingDate: checkout.nextBillingDate,
       message: 'Approve mandate to enable automatic monthly renewal.',
     });
   } catch (err) {
@@ -851,6 +866,18 @@ export const verifyPayment = async (req, res, next) => {
     }
 
     const snap = await computeExamUsageSnapshotWithEnterprise(updatedUser);
+    let autoPayCheckout = null;
+    const isPersonalSubscription = txnUpdated.purchaseType === 'subscription'
+      && (txnUpdated.billingScope || 'personal') === 'personal';
+    if (isPersonalSubscription && isInstructorLike(updatedUser)) {
+      try {
+        const freshUser = await User.findById(updatedUser._id);
+        autoPayCheckout = await buildAutoPayCheckoutForUser(freshUser);
+      } catch (e) {
+        logger.warn('AutoPay setup after purchase failed:', e?.message || e);
+      }
+    }
+
     res.json({
       success: true,
       plan: updatedUser.plan,
@@ -858,6 +885,7 @@ export const verifyPayment = async (req, res, next) => {
       remaining: snap?.remaining ?? 0,
       extraExamCreditsBalance: updatedUser.extraExamCreditsBalance || 0,
       examsTotalCap: snap?.totalCap ?? 0,
+      ...(autoPayCheckout ? { autoPayCheckout } : {}),
     });
   } catch (err) {
     next(err);

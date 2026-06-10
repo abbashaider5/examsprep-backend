@@ -360,15 +360,25 @@ export async function resolveCurrentIndividualPlan(user, planCatalog = null) {
     .lean();
 
   let code = normCode(user.individualPlanCode);
-  if (!code || code === 'free') {
+  const paidSub = await Subscription.findOne({
+    user: user._id,
+    status: { $in: ACTIVE_SUB_STATUSES },
+    isTrial: { $ne: true },
+  })
+    .select('individualPlanCode plan')
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .lean();
+  if (paidSub?.individualPlanCode) {
+    code = normCode(paidSub.individualPlanCode);
+  } else if (!code || code === 'free') {
     const sub = await Subscription.findOne({
       user: user._id,
       status: { $in: ACTIVE_SUB_STATUSES },
     })
-      .select('individualPlanCode plan')
-      .sort({ updatedAt: -1, createdAt: -1 })
+      .select('individualPlanCode plan isTrial')
+      .sort({ isTrial: 1, updatedAt: -1, createdAt: -1 })
       .lean();
-    code = normCode(sub?.individualPlanCode);
+    code = normCode(sub?.individualPlanCode) || code;
   }
 
   if (!code || code === 'free') return null;
@@ -384,20 +394,37 @@ export async function resolveCurrentIndividualPlan(user, planCatalog = null) {
  * Upgrade targets: strictly higher sortOrder; never current or lower tiers.
  * Free users (no current plan) see all catalog plans with sortOrder >= 0.
  */
-export function filterUpgradeEligiblePlans(planCatalog, currentPlan, user) {
-  const currentCode = normCode(currentPlan?.code);
-  const currentOrder = currentPlan != null
-    ? Number(currentPlan.sortOrder ?? 0)
+function isUpgradePlanCandidate(p, currentPlan, currentCode, currentOrder) {
+  if (!p?.code || p.isActive === false) return false;
+  if (currentCode && normCode(p.code) === currentCode) return false;
+  const pOrder = Number(p.sortOrder ?? 0);
+  if (pOrder > currentOrder) return true;
+  if (currentPlan && pOrder === currentOrder) {
+    const curPrice = Number(currentPlan.pricing?.monthlyPricePaise ?? 0);
+    const pPrice = Number(p.pricing?.monthlyPricePaise ?? 0);
+    return pPrice > curPrice;
+  }
+  return false;
+}
+
+export function filterUpgradeEligiblePlans(planCatalog, currentPlan, user, limitsCtx = null) {
+  let resolvedCurrent = currentPlan;
+  if (limitsCtx?.source === 'trial' && limitsCtx?.planRecord) {
+    resolvedCurrent = limitsCtx.planRecord;
+  }
+
+  const currentCode = normCode(resolvedCurrent?.code);
+  const currentOrder = resolvedCurrent != null
+    ? Number(resolvedCurrent.sortOrder ?? 0)
     : (effectivePlanType(user) === 'free' ? -1 : 0);
 
   return [...(planCatalog || [])]
-    .filter((p) => {
-      if (!p?.code) return false;
-      if (currentCode && normCode(p.code) === currentCode) return false;
-      const pOrder = Number(p.sortOrder ?? 0);
-      return pOrder > currentOrder;
-    })
-    .sort((a, b) => Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0));
+    .filter((p) => isUpgradePlanCandidate(p, resolvedCurrent, currentCode, currentOrder))
+    .sort((a, b) => {
+      const orderDiff = Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0);
+      if (orderDiff !== 0) return orderDiff;
+      return Number(a.pricing?.monthlyPricePaise ?? 0) - Number(b.pricing?.monthlyPricePaise ?? 0);
+    });
 }
 
 /** Billing page: current plan + upgrade list from authoritative DB resolution. */
@@ -418,7 +445,7 @@ export async function resolveBillingPlanContext(user, planCatalog = null) {
     ? Number(currentPlan.sortOrder ?? 0)
     : (effectivePlanType(user) === 'free' ? -1 : Number(limitsCtx?.sortOrder ?? 0));
 
-  const upgradeEligiblePlans = filterUpgradeEligiblePlans(catalog, currentPlan, user);
+  const upgradeEligiblePlans = filterUpgradeEligiblePlans(catalog, currentPlan, user, limitsCtx);
 
   return {
     currentPlan,

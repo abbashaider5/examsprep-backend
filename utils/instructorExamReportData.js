@@ -49,6 +49,7 @@ export async function buildInstructorExamReportData(exam) {
       email,
       name: name || null,
       inviteStatus: inv?.status || 'batch',
+      enrollmentSource: inv?.enrollmentSource || 'normal',
       invitedAt: inv?.createdAt || null,
       reattemptCount: inv?.reattemptCount || 0,
       totalAttempts: userResults.length,

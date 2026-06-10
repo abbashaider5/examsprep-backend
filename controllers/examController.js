@@ -10,6 +10,7 @@ import { retrieveGroundingContext } from '../services/resourceRetrievalService.j
 import { buildCurriculumWebAiOptions } from '../services/curriculumTopicService.js';
 import { formatAiTraceTree, getAiRequestReport, initAiTraceForRequest } from '../services/ai/aiRequestTrace.js';
 import { enqueueResourceProcessing } from '../services/resourceProcessingService.js';
+import Result from '../models/Result.js';
 import Screenshot from '../models/Screenshot.js';
 import User from '../models/User.js';
 import UserExamShuffle from '../models/UserExamShuffle.js';
@@ -28,6 +29,7 @@ import {
 } from '../services/aiService.js';
 import { delCache, getCache, setCache } from '../services/cacheService.js';
 import { buildInstructorExamReportData } from '../utils/instructorExamReportData.js';
+import { getAccessKeysByExamIds } from '../services/examAccessKeyService.js';
 import { isCloudinaryConfigured, signedAuthenticatedMediaUrl, uploadScreenshot, downloadStoredResourceBuffer } from '../services/cloudinaryService.js';
 import { interleaveListeningEvenly, synthesizeAndAttachListeningAudio } from '../services/examListeningService.js';
 import { isCambAiTtsConfigured, synthesizeExamNarration } from '../services/tts/ttsService.js';
@@ -1069,6 +1071,9 @@ export const getMyExams = async (req, res, next) => {
 
     const exams = await Exam.find({ createdBy: req.user._id }).sort({ createdAt: -1 }).select('-questions');
     const isInstructor = ['instructor', 'admin'].includes(req.user.role);
+    const accessKeyMap = isInstructor
+      ? await getAccessKeysByExamIds(exams.map((e) => e._id))
+      : {};
     const examsPayload = await Promise.all(
       exams.map(async (e) => {
         const plain = e.toObject();
@@ -1080,6 +1085,7 @@ export const getMyExams = async (req, res, next) => {
           const notAttempted = Math.max(0, summary.totalParticipants - summary.attempted);
           return {
             ...plain,
+            accessKey: accessKeyMap[e._id.toString()] || null,
             attemptSummary: {
               participants: summary.totalParticipants,
               uniqueAttempted: summary.attempted,
@@ -1315,6 +1321,12 @@ export const getExamById = async (req, res, next) => {
     }
 
     const practiceMode = req.query.practice === 'true';
+    if (practiceMode && !isOwner && !isAdmin) {
+      const hasAttempt = await Result.exists({ exam: exam._id, user: req.user._id });
+      if (!hasAttempt) {
+        return next(new AppError('Complete the exam at least once before using flashcards or review.', 403));
+      }
+    }
     const payload = exam.toObject();
 
     if (!isOwner && !isAdmin && !practiceMode) {

@@ -21,6 +21,7 @@ import { fromReq, log } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
 import { computeResultMetrics } from '../utils/resultMetrics.js';
 import { createNotificationsForUsers } from './notificationController.js';
+import { getAccessKeysByExamIds } from '../services/examAccessKeyService.js';
 
 /** Ensures answers are always a plain array for JSON / frontend iteration. */
 function normalizeAnswersArray(ans) {
@@ -102,10 +103,13 @@ export const getMyExams = async (req, res, next) => {
     ]);
     const inviteMap = Object.fromEntries(inviteCounts.map(i => [i._id.toString(), i]));
 
+    const accessKeyMap = await getAccessKeysByExamIds(examIds);
+
     const examsWithStats = exams.map(e => ({
       ...e.toObject(),
       inviteCount: inviteMap[e._id.toString()]?.total || 0,
       acceptedCount: inviteMap[e._id.toString()]?.accepted || 0,
+      accessKey: accessKeyMap[e._id.toString()] || null,
     }));
 
     const payload = { exams: examsWithStats };
@@ -277,16 +281,21 @@ export const getInstructorAnalytics = async (req, res, next) => {
       ? Math.round(examsWithAttempts.reduce((s, r) => s + (r.avgLatestScore || 0), 0) / examsWithAttempts.length)
       : 0;
 
+    const accessKeyMap = await getAccessKeysByExamIds(examIds);
+
     const examsWithStats = exams.map(e => {
       const inv = inviteExamMap[e._id.toString()] || {};
       const st = resultMap[e._id.toString()] || { count: 0, avgScore: 0, passCount: 0, failCount: 0 };
+      const ak = accessKeyMap[e._id.toString()] || null;
       return {
         _id: e._id, title: e.title, subject: e.subject,
         difficulty: e.difficulty, timesAttempted: e.timesAttempted,
         proctored: e.proctored, certificate: e.certificate,
         allowReattempt: e.allowReattempt, showAnswersAfter: e.showAnswersAfter,
         passingPercentage: e.passingPercentage, expiryDate: e.expiryDate,
+        multipleSets: e.multipleSets,
         questions: e.questions, questionCount: e.questions?.length || 0,
+        accessKey: ak,
         stats: {
           count: st.count,
           avgScore: st.avgScore,

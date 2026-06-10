@@ -14,6 +14,8 @@ const examInviteSchema = new mongoose.Schema({
   result: { type: mongoose.Schema.Types.ObjectId, ref: 'Result', default: null },
   reattemptCount: { type: Number, default: 0 },
   expiresAt: { type: Date, default: () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) },
+  enrollmentSource: { type: String, enum: ['normal', 'access_key'], default: 'normal' },
+  accessKeyRef: { type: mongoose.Schema.Types.ObjectId, ref: 'ExamAccessKey', default: null },
 }, { timestamps: true });
 
 examInviteSchema.index({ token: 1 }, { unique: true });

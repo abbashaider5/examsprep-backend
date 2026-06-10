@@ -107,9 +107,11 @@ export async function assignInstructorTrialToUser(userOrId) {
 /**
  * Apply instructor onboarding at signup: role + optional trial (skipped for org invites).
  */
-export async function applyInstructorSignupOnboarding(user, { skipTrial = false } = {}) {
+export async function applyInstructorSignupOnboarding(user, { skipTrial = false, organizationType = 'school' } = {}) {
   if (!user) return user;
   user.role = 'instructor';
+  const ot = String(organizationType || 'school').toLowerCase();
+  user.organizationType = ot === 'institute' ? 'institute' : 'school';
   await user.save({ validateBeforeSave: false });
 
   if (skipTrial) return user;
