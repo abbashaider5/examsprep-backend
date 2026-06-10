@@ -495,17 +495,39 @@ export const refreshAccessToken = async (req, res, next) => {
 
 // ── Logout ────────────────────────────────────────────────────────────────────
 export const logout = async (req, res) => {
-  const token = req.cookies?.refreshToken;
-  if (token) {
-    const decoded = jwt.decode(token);
-    if (decoded?.id) {
-      const user = await User.findById(decoded.id);
-      if (user) {
-        await User.findByIdAndUpdate(decoded.id, { refreshToken: null });
-        await log({ user, action: 'logout', category: 'auth' });
+  let userId = null;
+
+  const refreshCookie = req.cookies?.refreshToken;
+  if (refreshCookie) {
+    const decoded = jwt.decode(refreshCookie);
+    userId = decoded?.id || null;
+  }
+
+  if (!userId) {
+    const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '');
+    const accessCookie = req.cookies?.accessToken;
+    const raw = bearer || accessCookie;
+    if (raw) {
+      try {
+        const decoded = jwt.verify(raw, process.env.JWT_SECRET);
+        userId = decoded?.id || null;
+      } catch {
+        try {
+          const decoded = jwt.decode(raw);
+          userId = decoded?.id || null;
+        } catch { /* ignore */ }
       }
     }
   }
+
+  if (userId) {
+    await User.findByIdAndUpdate(userId, { refreshToken: null });
+    const user = await User.findById(userId);
+    if (user) {
+      await log({ user, action: 'logout', category: 'auth' });
+    }
+  }
+
   clearAuthCookies(res);
   res.json({ message: 'Logged out successfully' });
 };
