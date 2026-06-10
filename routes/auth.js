@@ -39,7 +39,9 @@ router.post('/totp/confirm', protect, authLimiter, [
   validate,
 ], confirmTotp);
 router.post('/totp/toggle', protect, authLimiter, [
-  body('enabled').isBoolean().withMessage('enabled must be true or false'),
+  body('enabled').custom((v) => v === true || v === false || v === 'true' || v === 'false')
+    .withMessage('enabled must be true or false')
+    .toBoolean(),
   validate,
 ], toggleTotp);
 router.post('/request-otp', authLimiter, [body('email').isEmail().normalizeEmail(emailNormalizeOpts), validate], requestOTP);

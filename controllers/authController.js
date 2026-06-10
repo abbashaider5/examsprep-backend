@@ -79,10 +79,14 @@ const recaptchaEnforcedForCredentials = (settings) =>
 const shouldRequireTwoFactor = (user, settings) =>
   !!(settings?.emailOtpEnabled && (user?.twoFactorEnabled || (settings?.twoFactorAuthEnabled && settings?.twoFactorRequired)));
 
+/** Login-time email OTP — only when the user has enabled it in Settings. */
+const userWantsEmailOTPAtLogin = (user, settings) =>
+  !!(settings?.emailOtpEnabled && user?.twoFactorEnabled);
+
 const getEnabled2FAMethods = (user, settings, totpRow) => {
   const methods = [];
   if (totpRow?.totpEnabled) methods.push('totp');
-  if (shouldRequireTwoFactor(user, settings)) methods.push('email');
+  if (userWantsEmailOTPAtLogin(user, settings)) methods.push('email');
   return methods;
 };
 
@@ -615,16 +619,23 @@ export const begin2FAMethod = async (req, res, next) => {
       return next(new AppError('Verification method not available.', 400));
     }
 
-    const user = await User.findById(payload.sub);
+    const user = await User.findById(payload.sub).select('+totpEnabled');
     if (!user) return next(new AppError('User not found', 404));
 
     const settings = await getSettings();
     const email = user.email;
+    const methods = getEnabled2FAMethods(user, settings, user);
 
     if (method === 'email') {
+      if (!methods.includes('email')) {
+        return next(new AppError('Email verification is not enabled for this account.', 400));
+      }
       return beginTwoFactorLogin({ user, email, settings, req, res });
     }
     if (method === 'totp') {
+      if (!methods.includes('totp')) {
+        return next(new AppError('Authenticator is not enabled for this account.', 400));
+      }
       return beginTotpLogin({ user, email, req, res });
     }
     return next(new AppError('Invalid verification method', 400));
@@ -659,7 +670,7 @@ const sanitizeUser = (user) => ({
   authProvider: user.authProvider || 'local',
   twoFactorEnabled: !!user.twoFactorEnabled,
   totpEnabled: !!user.totpEnabled,
-  totpConfigured: !!user.totpConfigured,
+  totpConfigured: !!(user.totpConfigured || user.totpEnabled),
   isPublic: user.isPublic,
   plan: user.getEffectivePlan ? user.getEffectivePlan() : (user.plan || 'free'),
   individualPlanCode: user.individualPlanCode || '',
