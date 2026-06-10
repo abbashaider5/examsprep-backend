@@ -33,6 +33,7 @@ const userSchema = new mongoose.Schema({
   authProvider: { type: String, enum: ['local', 'google'], default: 'local' },
   twoFactorEnabled: { type: Boolean, default: false },
   totpEnabled: { type: Boolean, default: false },
+  totpConfigured: { type: Boolean, default: false },
   totpSecretEncrypted: { type: String, default: '', select: false },
   totpPendingSecretEncrypted: { type: String, default: '', select: false },
 

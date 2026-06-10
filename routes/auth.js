@@ -1,6 +1,6 @@
 import express from 'express';
-import { forgotPassword, getMe, googleAuth, login, logout, refreshAccessToken, requestOTP, resetPassword, signup, verifyOTP, completeAccountOnboarding } from '../controllers/authController.js';
-import { confirmTotp, disableTotp, setupTotp, verifyTotpLogin } from '../controllers/totpController.js';
+import { begin2FAMethod, forgotPassword, getMe, googleAuth, login, logout, refreshAccessToken, requestOTP, resetPassword, signup, verifyOTP, completeAccountOnboarding } from '../controllers/authController.js';
+import { confirmTotp, setupTotp, toggleTotp, verifyTotpLogin } from '../controllers/totpController.js';
 import { protect } from '../middleware/auth.js';
 import { authLimiter } from '../middleware/rateLimiter.js';
 import { loginValidation, signupValidation, validate } from '../middleware/validation.js';
@@ -28,15 +28,20 @@ router.post('/verify-totp', authLimiter, [
   body('code').isLength({ min: 6, max: 6 }).isNumeric().withMessage('Code must be 6 digits'),
   validate,
 ], verifyTotpLogin);
+router.post('/2fa/begin', authLimiter, [
+  body('pendingToken').isString().notEmpty(),
+  body('method').isIn(['email', 'totp']).withMessage('Invalid verification method'),
+  validate,
+], begin2FAMethod);
 router.post('/totp/setup', protect, authLimiter, setupTotp);
 router.post('/totp/confirm', protect, authLimiter, [
   body('code').isLength({ min: 6, max: 6 }).isNumeric().withMessage('Code must be 6 digits'),
   validate,
 ], confirmTotp);
-router.post('/totp/disable', protect, authLimiter, [
-  body('code').isLength({ min: 6, max: 6 }).isNumeric().withMessage('Code must be 6 digits'),
+router.post('/totp/toggle', protect, authLimiter, [
+  body('enabled').isBoolean().withMessage('enabled must be true or false'),
   validate,
-], disableTotp);
+], toggleTotp);
 router.post('/request-otp', authLimiter, [body('email').isEmail().normalizeEmail(emailNormalizeOpts), validate], requestOTP);
 router.post('/forgot-password', authLimiter, [
   body('email').isEmail().normalizeEmail(emailNormalizeOpts).withMessage('Enter a valid email'),

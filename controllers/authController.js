@@ -17,7 +17,7 @@ import { verifyRecaptchaToken } from '../services/recaptchaService.js';
 import { computeExamUsageSnapshotWithEnterprise } from '../services/subscriptionUsageService.js';
 import { effectivePlanType, getUserPlanLimits } from '../services/userPlanLimitsService.js';
 import { applyInstructorSignupOnboarding } from '../services/instructorTrialService.js';
-import { beginTotpLogin } from './totpController.js';
+import { begin2FAChoice, beginTotpLogin } from './totpController.js';
 import { buildEnterpriseRenewalTimeline } from '../services/subscriptionLifecycleService.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
@@ -78,6 +78,29 @@ const recaptchaEnforcedForCredentials = (settings) =>
 
 const shouldRequireTwoFactor = (user, settings) =>
   !!(settings?.emailOtpEnabled && (user?.twoFactorEnabled || (settings?.twoFactorAuthEnabled && settings?.twoFactorRequired)));
+
+const getEnabled2FAMethods = (user, settings, totpRow) => {
+  const methods = [];
+  if (totpRow?.totpEnabled) methods.push('totp');
+  if (shouldRequireTwoFactor(user, settings)) methods.push('email');
+  return methods;
+};
+
+const gateLoginWith2FA = async ({ user, email, settings, req, res }) => {
+  const totpRow = await User.findById(user._id).select('+totpEnabled');
+  const methods = getEnabled2FAMethods(user, settings, totpRow);
+  if (methods.length === 0) return false;
+  if (methods.length === 1) {
+    if (methods[0] === 'totp') {
+      beginTotpLogin({ user, email, req, res });
+      return true;
+    }
+    await beginTwoFactorLogin({ user, email, settings, req, res });
+    return true;
+  }
+  begin2FAChoice({ user, email, methods, res });
+  return true;
+};
 
 const beginTwoFactorLogin = async ({ user, email, settings, req, res }) => {
   if (!settings.emailOtpEnabled) {
@@ -262,14 +285,7 @@ export const login = async (req, res, next) => {
 
     await user.resetFailedLogins();
 
-    const userWithTotp = await User.findById(user._id).select('+totpEnabled');
-    if (userWithTotp?.totpEnabled) {
-      return beginTotpLogin({ user, email: user.email, req, res });
-    }
-
-    if (shouldRequireTwoFactor(user, settings)) {
-      return beginTwoFactorLogin({ user, email, settings, req, res });
-    }
+    if (await gateLoginWith2FA({ user, email, settings, req, res })) return;
 
     const { accessToken, refreshToken } = setAuthCookies(res, user._id);
     await User.findByIdAndUpdate(user._id, { refreshToken });
@@ -341,14 +357,7 @@ export const googleAuth = async (req, res, next) => {
       await user.save({ validateBeforeSave: false });
     }
 
-    const userWithTotp = await User.findById(user._id).select('+totpEnabled');
-    if (userWithTotp?.totpEnabled) {
-      return beginTotpLogin({ user, email, req, res });
-    }
-
-    if (shouldRequireTwoFactor(user, settings)) {
-      return beginTwoFactorLogin({ user, email, settings, req, res });
-    }
+    if (await gateLoginWith2FA({ user, email, settings, req, res })) return;
 
     const { accessToken, refreshToken } = setAuthCookies(res, user._id);
     await User.findByIdAndUpdate(user._id, { refreshToken });
@@ -586,6 +595,42 @@ export const requestOTP = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+export const begin2FAMethod = async (req, res, next) => {
+  try {
+    const { pendingToken, method } = req.body;
+    if (!pendingToken || !method) {
+      return next(new AppError('Verification method is required', 400));
+    }
+
+    let payload;
+    try {
+      payload = jwt.verify(pendingToken, process.env.JWT_SECRET);
+    } catch {
+      return next(new AppError('Login session expired. Please sign in again.', 401));
+    }
+    if (payload?.purpose !== 'two_factor_login' || !payload?.sub) {
+      return next(new AppError('Invalid login session', 401));
+    }
+    if (!payload.methods?.includes(method)) {
+      return next(new AppError('Verification method not available.', 400));
+    }
+
+    const user = await User.findById(payload.sub);
+    if (!user) return next(new AppError('User not found', 404));
+
+    const settings = await getSettings();
+    const email = user.email;
+
+    if (method === 'email') {
+      return beginTwoFactorLogin({ user, email, settings, req, res });
+    }
+    if (method === 'totp') {
+      return beginTotpLogin({ user, email, req, res });
+    }
+    return next(new AppError('Invalid verification method', 400));
+  } catch (err) { next(err); }
+};
+
 // ── Sanitize ──────────────────────────────────────────────────────────────────
 const sanitizeUser = (user) => ({
   id: user._id,
@@ -614,6 +659,7 @@ const sanitizeUser = (user) => ({
   authProvider: user.authProvider || 'local',
   twoFactorEnabled: !!user.twoFactorEnabled,
   totpEnabled: !!user.totpEnabled,
+  totpConfigured: !!user.totpConfigured,
   isPublic: user.isPublic,
   plan: user.getEffectivePlan ? user.getEffectivePlan() : (user.plan || 'free'),
   individualPlanCode: user.individualPlanCode || '',
@@ -626,6 +672,10 @@ const sanitizeUser = (user) => ({
 
 export async function buildUserResponse(user, req) {
   const fresh = await User.findById(user._id);
+  if (fresh?.totpEnabled && !fresh.totpConfigured) {
+    await User.findByIdAndUpdate(fresh._id, { totpConfigured: true });
+    fresh.totpConfigured = true;
+  }
   if (!fresh) {
     const base = sanitizeUser(user);
     return { ...base, enterprise: null, impersonation: null };
