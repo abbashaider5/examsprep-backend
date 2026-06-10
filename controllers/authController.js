@@ -17,6 +17,7 @@ import { verifyRecaptchaToken } from '../services/recaptchaService.js';
 import { computeExamUsageSnapshotWithEnterprise } from '../services/subscriptionUsageService.js';
 import { effectivePlanType, getUserPlanLimits } from '../services/userPlanLimitsService.js';
 import { applyInstructorSignupOnboarding } from '../services/instructorTrialService.js';
+import { beginTotpLogin } from './totpController.js';
 import { buildEnterpriseRenewalTimeline } from '../services/subscriptionLifecycleService.js';
 import { log, fromReq } from '../utils/activityLogger.js';
 import logger from '../utils/logger.js';
@@ -261,6 +262,11 @@ export const login = async (req, res, next) => {
 
     await user.resetFailedLogins();
 
+    const userWithTotp = await User.findById(user._id).select('+totpEnabled');
+    if (userWithTotp?.totpEnabled) {
+      return beginTotpLogin({ user, email: user.email, req, res });
+    }
+
     if (shouldRequireTwoFactor(user, settings)) {
       return beginTwoFactorLogin({ user, email, settings, req, res });
     }
@@ -333,6 +339,11 @@ export const googleAuth = async (req, res, next) => {
       user.authProvider = user.authProvider || 'google';
       if (!user.avatar && payload.picture) user.avatar = payload.picture;
       await user.save({ validateBeforeSave: false });
+    }
+
+    const userWithTotp = await User.findById(user._id).select('+totpEnabled');
+    if (userWithTotp?.totpEnabled) {
+      return beginTotpLogin({ user, email, req, res });
     }
 
     if (shouldRequireTwoFactor(user, settings)) {
@@ -602,6 +613,7 @@ const sanitizeUser = (user) => ({
   createdAt: user.createdAt,
   authProvider: user.authProvider || 'local',
   twoFactorEnabled: !!user.twoFactorEnabled,
+  totpEnabled: !!user.totpEnabled,
   isPublic: user.isPublic,
   plan: user.getEffectivePlan ? user.getEffectivePlan() : (user.plan || 'free'),
   individualPlanCode: user.individualPlanCode || '',
@@ -612,7 +624,7 @@ const sanitizeUser = (user) => ({
   lifetimeExamsCreated: user.lifetimeExamsCreated ?? 0,
 });
 
-async function buildUserResponse(user, req) {
+export async function buildUserResponse(user, req) {
   const fresh = await User.findById(user._id);
   if (!fresh) {
     const base = sanitizeUser(user);

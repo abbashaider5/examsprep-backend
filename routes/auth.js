@@ -1,5 +1,6 @@
 import express from 'express';
 import { forgotPassword, getMe, googleAuth, login, logout, refreshAccessToken, requestOTP, resetPassword, signup, verifyOTP, completeAccountOnboarding } from '../controllers/authController.js';
+import { confirmTotp, disableTotp, setupTotp, verifyTotpLogin } from '../controllers/totpController.js';
 import { protect } from '../middleware/auth.js';
 import { authLimiter } from '../middleware/rateLimiter.js';
 import { loginValidation, signupValidation, validate } from '../middleware/validation.js';
@@ -22,6 +23,20 @@ router.post('/verify-otp', authLimiter, [
   body('otp').isLength({ min: 6, max: 6 }).isNumeric().withMessage('OTP must be 6 digits'),
   validate,
 ], verifyOTP);
+router.post('/verify-totp', authLimiter, [
+  body('pendingToken').isString().notEmpty(),
+  body('code').isLength({ min: 6, max: 6 }).isNumeric().withMessage('Code must be 6 digits'),
+  validate,
+], verifyTotpLogin);
+router.post('/totp/setup', protect, authLimiter, setupTotp);
+router.post('/totp/confirm', protect, authLimiter, [
+  body('code').isLength({ min: 6, max: 6 }).isNumeric().withMessage('Code must be 6 digits'),
+  validate,
+], confirmTotp);
+router.post('/totp/disable', protect, authLimiter, [
+  body('code').isLength({ min: 6, max: 6 }).isNumeric().withMessage('Code must be 6 digits'),
+  validate,
+], disableTotp);
 router.post('/request-otp', authLimiter, [body('email').isEmail().normalizeEmail(emailNormalizeOpts), validate], requestOTP);
 router.post('/forgot-password', authLimiter, [
   body('email').isEmail().normalizeEmail(emailNormalizeOpts).withMessage('Enter a valid email'),

@@ -32,6 +32,9 @@ const userSchema = new mongoose.Schema({
   googleId: { type: String, default: null, index: true },
   authProvider: { type: String, enum: ['local', 'google'], default: 'local' },
   twoFactorEnabled: { type: Boolean, default: false },
+  totpEnabled: { type: Boolean, default: false },
+  totpSecretEncrypted: { type: String, default: '', select: false },
+  totpPendingSecretEncrypted: { type: String, default: '', select: false },
 
   // Subscription / plan
   plan: { type: String, enum: ['free', 'pro', 'enterprise'], default: 'free' },
