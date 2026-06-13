@@ -5,7 +5,7 @@ import {
   getMyExams, getMyPendingInvites, reevaluateResult, rejectInvite, sendClassInvite, sendGroupInvite, sendInvite, validateInviteToken,
 } from '../controllers/instructorController.js';
 import {
-  enrollViaAccessKey, getExamAccessKey, removeExamAccessKey, saveExamAccessKey,
+  enrollViaAccessKey, getExamAccessKey, previewAccessKey, removeExamAccessKey, saveExamAccessKey,
 } from '../controllers/examAccessKeyController.js';
 import { protect, requireInstructor } from '../middleware/auth.js';
 
@@ -20,6 +20,7 @@ router.post('/invite/:token/accept', protect, acceptInvite);
 router.post('/invite/:token/reject', protect, rejectInvite);
 router.get('/my-invites', protect, getMyPendingInvites);
 router.get('/my-accepted-invites', protect, getMyAcceptedInvites);
+router.post('/access-keys/preview', protect, previewAccessKey);
 router.post('/access-keys/enroll', protect, enrollViaAccessKey);
 
 // Instructor-only routes

@@ -2,6 +2,7 @@ import {
   deleteExamAccessKey,
   enrollStudentWithAccessKey,
   getExamAccessKeyForInstructor,
+  previewAccessKeyEnrollment,
   upsertExamAccessKey,
 } from '../services/examAccessKeyService.js';
 
@@ -27,6 +28,14 @@ export const saveExamAccessKey = async (req, res, next) => {
 export const removeExamAccessKey = async (req, res, next) => {
   try {
     const data = await deleteExamAccessKey(req.params.examId, req.user);
+    res.json(data);
+  } catch (err) { next(err); }
+};
+
+export const previewAccessKey = async (req, res, next) => {
+  try {
+    const { accessKey } = req.body;
+    const data = await previewAccessKeyEnrollment(req.user, accessKey);
     res.json(data);
   } catch (err) { next(err); }
 };

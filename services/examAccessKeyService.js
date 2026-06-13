@@ -150,7 +150,14 @@ export async function deleteExamAccessKey(examId, user) {
   return { message: 'Access key deleted' };
 }
 
-export async function enrollStudentWithAccessKey(user, rawKey) {
+function examTypeLabel(exam) {
+  if (exam.examType === 'descriptive') return 'Descriptive';
+  if (exam.examType === 'mixed') return 'Mixed';
+  if (exam.examType === 'coding' || exam.enableCoding) return 'Coding';
+  return 'MCQ';
+}
+
+async function resolveAccessKeyForStudent(user, rawKey) {
   if (user.role !== 'user') {
     throw new AppError('Only student accounts can enroll with an access key.', 403);
   }
@@ -160,7 +167,10 @@ export async function enrollStudentWithAccessKey(user, rawKey) {
     throw new AppError('Invalid exam access key.', 400);
   }
 
-  const keyDoc = await ExamAccessKey.findOne({ accessKey: normalized }).populate('exam', 'title subject difficulty proctored questions multipleSets questionVariants expiryDate createdBy');
+  const keyDoc = await ExamAccessKey.findOne({ accessKey: normalized }).populate(
+    'exam',
+    'title subject difficulty proctored questions multipleSets questionVariants expiryDate createdBy examType timePerQuestion enableCoding',
+  );
   if (!keyDoc) throw new AppError('Invalid exam access key.', 404);
   if (!keyDoc.isActive) throw new AppError('This exam key is currently inactive.', 403);
   if (keyDoc.enrolledCount >= keyDoc.enrollmentLimit) {
@@ -182,6 +192,36 @@ export async function enrollStudentWithAccessKey(user, rawKey) {
   if (existing) {
     throw new AppError('You are already enrolled in this exam.', 409);
   }
+
+  return { normalized, keyDoc, exam, email };
+}
+
+export async function previewAccessKeyEnrollment(user, rawKey) {
+  const { normalized, keyDoc, exam } = await resolveAccessKeyForStudent(user, rawKey);
+  const instructor = await User.findById(keyDoc.instructorId).select('name').lean();
+  const questionCount = exam.questions?.length || 0;
+  const totalSeconds = questionCount * (exam.timePerQuestion || 60);
+
+  return {
+    accessKey: normalized,
+    exam: {
+      _id: exam._id,
+      title: exam.title,
+      subject: exam.subject,
+      difficulty: exam.difficulty,
+      examType: exam.examType,
+      examTypeLabel: examTypeLabel(exam),
+      questionCount,
+      durationMinutes: Math.max(1, Math.ceil(totalSeconds / 60)),
+      expiryDate: exam.expiryDate || null,
+    },
+    instructorName: instructor?.name || 'Instructor',
+    seatsRemaining: Math.max(0, keyDoc.enrollmentLimit - keyDoc.enrolledCount),
+  };
+}
+
+export async function enrollStudentWithAccessKey(user, rawKey) {
+  const { keyDoc, exam, email } = await resolveAccessKeyForStudent(user, rawKey);
 
   const updatedKey = await ExamAccessKey.findOneAndUpdate(
     {
