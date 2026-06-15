@@ -4,7 +4,7 @@ import './utils/runtimePolyfills.js';
 if (typeof dns.setDefaultResultOrder === 'function') {
   dns.setDefaultResultOrder('ipv4first');
 }
-// Note: top-level await is supported in ES modules (package.json "type": "module") — no need for an async IIFE wrapper.
+// Note: top-level await is supported in ES modules (package.json "type": "module") — no need for an async IIFE wrapper...but let's keep it for now for consistency.
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import dotenv from 'dotenv';
