@@ -8,20 +8,30 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: Validate Vercel secrets
+        id: vercel_secrets
+        run: |
+          if [ -z "${VERCEL_TOKEN}" ] || [ -z "${VERCEL_ORG_ID}" ] || [ -z "${VERCEL_PROJECT_ID}" ]; then
+            echo "::warning::Skipping deploy because one or more required Vercel secrets are missing (VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID)."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install Vercel CLI
+        if: steps.vercel_secrets.outputs.ready == 'true'
         run: npm install -g vercel@latest
       - name: Pull Vercel settings
-        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        if: steps.vercel_secrets.outputs.ready == 'true'
+        run: vercel pull --yes --environment=production --token="${VERCEL_TOKEN}"
       - name: Build and deploy
-        run: vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        if: steps.vercel_secrets.outputs.ready == 'true'
+        run: vercel deploy --prod --token="${VERCEL_TOKEN}"
