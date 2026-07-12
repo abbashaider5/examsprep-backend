@@ -37,12 +37,7 @@ async function ingestResourceUpload(req, res, next, input) {
   if (!title?.trim()) return next(new AppError('Title is required', 400));
   if (!buffer?.length) return next(new AppError('Uploaded file is empty. Please choose the file again.', 400));
   if (buffer.length > RESOURCE_UPLOAD_MAX_BYTES) {
-    return next(new AppError(
-      process.env.VERCEL
-        ? 'File is too large for production upload (max 4.5 MB).'
-        : 'File is too large (max 20 MB).',
-      413,
-    ));
+    return next(new AppError('File is too large (max 20 MB).', 413));
   }
 
   const isAdmin = req.user.role === 'admin';

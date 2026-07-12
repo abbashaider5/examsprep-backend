@@ -70,9 +70,7 @@ export const errorHandler = (err, req, res, next) => {
   if (err.name === 'MulterError') {
     if (err.code === 'LIMIT_FILE_SIZE') {
       return res.status(413).json({
-        message: process.env.VERCEL
-          ? 'File is too large for production upload (max 4.5 MB). Use a smaller file or Word (.docx).'
-          : 'File is too large (max 20 MB).',
+        message: 'File is too large (max 20 MB).',
         code: 'FILE_TOO_LARGE',
       });
     }
