@@ -96,7 +96,7 @@ export const getProfile = async (req, res, next) => {
 
 export const updateProfile = async (req, res, next) => {
   try {
-    const allowed = ['name', 'avatar', 'isPublic', 'twoFactorEnabled', 'schoolName', 'address', 'autoRenew'];
+    const allowed = ['name', 'avatar', 'isPublic', 'twoFactorEnabled', 'schoolName', 'address', 'autoRenew', 'aboutMe'];
     const updates = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
 
     // Enterprise principals and enterprise-linked instructors inherit organization details from Enterprise.
@@ -104,6 +104,14 @@ export const updateProfile = async (req, res, next) => {
     if ((req.user.role === 'principal') || (req.user.role === 'instructor' && req.user.enterpriseId)) {
       delete updates.schoolName;
       delete updates.address;
+    }
+
+    if (updates.aboutMe !== undefined) {
+      if (!['instructor', 'admin'].includes(req.user.role)) {
+        delete updates.aboutMe;
+      } else {
+        updates.aboutMe = String(updates.aboutMe || '').trim().slice(0, 1000);
+      }
     }
 
     if (updates.name !== undefined && !String(updates.name).trim()) {

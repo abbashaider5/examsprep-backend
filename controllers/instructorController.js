@@ -712,7 +712,7 @@ export const validateInviteToken = async (req, res, next) => {
   try {
     const invite = await ExamInvite.findOne({ token: req.params.token })
       .populate('exam', 'title subject difficulty questions proctored')
-      .populate('invitedBy', 'name');
+      .populate('invitedBy', 'name isInstructorVerified aboutMe');
 
     if (!invite) return next(new AppError('Invalid invite link', 404));
     if (invite.expiresAt < new Date()) {
@@ -734,7 +734,7 @@ export const getMyPendingInvites = async (req, res, next) => {
       expiresAt: { $gt: new Date() },
     })
       .populate('exam', 'title subject difficulty questions proctored timePerQuestion')
-      .populate('invitedBy', 'name')
+      .populate('invitedBy', 'name isInstructorVerified aboutMe')
       .sort({ createdAt: -1 });
     res.json({ invites });
   } catch (err) { next(err); }
@@ -748,7 +748,7 @@ export const getMyAcceptedInvites = async (req, res, next) => {
       status: 'accepted',
     })
       .populate('exam', 'title subject difficulty questions proctored timePerQuestion showFlashcards showReview allowReattempt certificateEnabled passingPercentage topics expiryDate')
-      .populate('invitedBy', 'name')
+      .populate('invitedBy', 'name isInstructorVerified aboutMe')
       .populate('group', 'name')
       .sort({ updatedAt: -1 });
     res.json({ invites });

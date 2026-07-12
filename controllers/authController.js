@@ -701,6 +701,8 @@ const sanitizeUser = (user) => ({
   planExpiresAt: user.planExpiresAt || null,
   planStatus: user.plan === 'free' ? 'free' : (user.planExpiresAt && user.planExpiresAt < new Date() ? 'expired' : 'active'),
   lifetimeExamsCreated: user.lifetimeExamsCreated ?? 0,
+  isInstructorVerified: !!user.isInstructorVerified,
+  aboutMe: user.aboutMe || '',
 });
 
 export async function buildUserResponse(user, req) {

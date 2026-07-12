@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import {
   createUser, deleteUser, getAdminSubscriptions, getAdminTransactions,
-  getPublicExams, getStats, getUsers, toggleBlockUser,
+  getPublicExams, getStats, getUsers, toggleBlockUser, toggleInstructorVerified,
   updateUserPlan, updateUserRole,
 } from '../controllers/adminController.js';
 import {
@@ -51,6 +51,7 @@ router.get('/users', getUsers);
 router.post('/users', createUser);
 router.patch('/users/:id/role', updateUserRole);
 router.patch('/users/:id/block', toggleBlockUser);
+router.patch('/users/:id/verify', toggleInstructorVerified);
 router.patch('/users/:id/plan', updateUserPlan);
 router.delete('/users/:id', deleteUser);
 router.get('/exams/public', getPublicExams);

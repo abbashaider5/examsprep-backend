@@ -161,10 +161,47 @@ export const createUser = async (req, res, next) => {
 export const updateUserRole = async (req, res, next) => {
   try {
     if (!['user', 'instructor', 'admin', 'principal'].includes(req.body.role)) return next(new AppError('Invalid role', 400));
-    const user = await User.findByIdAndUpdate(req.params.id, { role: req.body.role }, { new: true }).select('-password');
+    const updates = { role: req.body.role };
+    if (req.body.role !== 'instructor' && req.body.role !== 'admin') {
+      updates.isInstructorVerified = false;
+      updates.instructorVerifiedAt = null;
+      updates.instructorVerifiedBy = null;
+    }
+    const user = await User.findByIdAndUpdate(req.params.id, updates, { new: true }).select('-password');
     if (!user) return next(new AppError('User not found', 404));
     await log({ user: req.user, action: 'admin_role_changed', category: 'admin', metadata: { targetUserId: req.params.id, newRole: req.body.role }, ...fromReq(req) });
     res.json({ user });
+  } catch (err) { next(err); }
+};
+
+export const toggleInstructorVerified = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return next(new AppError('User not found', 404));
+    if (user.role !== 'instructor' && user.role !== 'admin') {
+      return next(new AppError('Only instructors can be verified', 400));
+    }
+    const nextVerified = req.body.verified !== undefined
+      ? Boolean(req.body.verified)
+      : !user.isInstructorVerified;
+    user.isInstructorVerified = nextVerified;
+    user.instructorVerifiedAt = nextVerified ? new Date() : null;
+    user.instructorVerifiedBy = nextVerified ? req.user._id : null;
+    await user.save({ validateBeforeSave: false });
+    await log({
+      user: req.user,
+      action: nextVerified ? 'admin_instructor_verified' : 'admin_instructor_unverified',
+      category: 'admin',
+      metadata: { targetUserId: req.params.id },
+      ...fromReq(req),
+    });
+    const safe = user.toObject({ virtuals: true });
+    delete safe.password;
+    res.json({
+      message: nextVerified ? 'Instructor verified' : 'Instructor verification removed',
+      isInstructorVerified: user.isInstructorVerified,
+      user: safe,
+    });
   } catch (err) { next(err); }
 };
 

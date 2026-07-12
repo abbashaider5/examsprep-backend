@@ -198,7 +198,7 @@ async function resolveAccessKeyForStudent(user, rawKey) {
 
 export async function previewAccessKeyEnrollment(user, rawKey) {
   const { normalized, keyDoc, exam } = await resolveAccessKeyForStudent(user, rawKey);
-  const instructor = await User.findById(keyDoc.instructorId).select('name').lean();
+  const instructor = await User.findById(keyDoc.instructorId).select('name isInstructorVerified aboutMe').lean();
   const questionCount = exam.questions?.length || 0;
   const totalSeconds = questionCount * (exam.timePerQuestion || 60);
 
@@ -216,6 +216,13 @@ export async function previewAccessKeyEnrollment(user, rawKey) {
       expiryDate: exam.expiryDate || null,
     },
     instructorName: instructor?.name || 'Instructor',
+    instructorVerified: !!instructor?.isInstructorVerified,
+    instructorAboutMe: instructor?.aboutMe || '',
+    instructor: {
+      name: instructor?.name || 'Instructor',
+      isVerified: !!instructor?.isInstructorVerified,
+      aboutMe: instructor?.aboutMe || '',
+    },
     seatsRemaining: Math.max(0, keyDoc.enrollmentLimit - keyDoc.enrolledCount),
   };
 }

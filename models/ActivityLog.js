@@ -16,6 +16,7 @@ const activityLogSchema = new mongoose.Schema({
       'profile_updated', 'password_changed',
       'admin_user_blocked', 'admin_user_unblocked', 'admin_user_deleted',
       'admin_role_changed', 'admin_settings_updated', 'admin_exam_deleted',
+      'admin_instructor_verified', 'admin_instructor_unverified',
       'proctoring_violation', 'proctoring_terminated',
       'enterprise_created', 'enterprise_teacher_invited', 'enterprise_teacher_removed',
       'enterprise_impersonation_started', 'enterprise_impersonation_ended',

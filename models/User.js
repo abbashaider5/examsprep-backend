@@ -94,6 +94,13 @@ const userSchema = new mongoose.Schema({
   accountLockedUntil: Date,
   isBlocked: { type: Boolean, default: false },
 
+  /** Super-admin verified instructor identity (shown as green checkmark to students). */
+  isInstructorVerified: { type: Boolean, default: false },
+  instructorVerifiedAt: { type: Date, default: null },
+  instructorVerifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  /** Instructor public bio shown to students (e.g. enrollment confirmation). */
+  aboutMe: { type: String, trim: true, maxlength: 1000, default: '' },
+
   refreshToken: { type: String, select: false },
 }, { timestamps: true });
 
